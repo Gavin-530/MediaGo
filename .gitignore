@@ -1,0 +1,198 @@
+# ============================================
+# 编译产物
+# ============================================
+*.d
+*.o
+*.obj
+*.slo
+*.lo
+*.gch
+*.pch
+*.mod
+*.smod
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.res
+*.tlog
+*.lastbuildstate
+*.unsuccessfulbuild
+*.sbr
+*.bsc
+*.ipdb
+*.iobj
+*.pgd
+*.pgc
+
+# 可执行文件 / 库
+*.exe
+*.out
+*.app
+*.so
+*.dylib
+*.dll
+*.lai
+*.la
+*.a
+*.lib
+
+# ============================================
+# 构建目录
+# ============================================
+build/
+cmake-build-*/
+out/
+dist/
+release/
+Debug/
+Release/
+x64/
+x86/
+[Bb]in/
+[Oo]bj/
+[Bb]inaries/
+_compile/
+_output/
+.ninja_deps
+.ninja_log
+compile_commands.json
+
+# ============================================
+# IDE / 编辑器
+# ============================================
+.idea/
+.vs/
+.vscode/
+*.swp
+*.swo
+*.swn
+*~
+*.sublime-workspace
+*.sublime-project
+*.vcxproj.user
+*.vcxproj.filters
+*.vcxproj
+*.sln
+*.suo
+*.user
+
+# ============================================
+# CMake / Make
+# ============================================
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+CMakeUserPresets.json
+
+# Make (启用则手写的 Makefile 也会被忽略)
+# Makefile
+
+# ============================================
+# 包管理器（库文件按需获取，不提交到仓库）
+# ============================================
+vcpkg_installed/
+vcpkg/
+packages/
+conanbuildinfo.*
+conaninfo.txt
+conan_imports_manifest.txt
+conan/
+
+# ============================================
+# 第三方库 / SDK（头文件 + .lib 可以留，.dll 不提交）
+# ============================================
+libs/
+external/
+third_party/
+vendor/
+deps/
+
+# ============================================
+# FFmpeg 运行时（通过脚本下载，不入库）
+# ============================================
+ffmpeg/
+ffmpeg-*/
+*.zip
+*.7z
+*.rar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+
+# ============================================
+# GUI 相关（Qt / wxWidgets / imgui 等）
+# ============================================
+moc_*.cpp
+moc_*.h
+ui_*.h
+qrc_*.cpp
+*.qm
+*.ts
+__pycache__/
+
+# ============================================
+# 打包 / 安装程序
+# ============================================
+*.msi
+*.pkg
+*.dmg
+*.AppImage
+*.nupkg
+packaging/
+installer/
+setup/
+InnoSetup/
+Output/
+
+# ============================================
+# 测试 / 文档生成
+# ============================================
+Testing/
+coverage/
+coverage_html/
+*.gcda
+*.gcno
+*.gcov
+docs/_build/
+htmlcov/
+
+# ============================================
+# 运行时 / 临时文件
+# ============================================
+*.log
+*.tmp
+*.temp
+*.cache
+*.pid
+/core
+/core.*
+*.stackdump
+.ccls-cache/
+.clangd/
+
+# ============================================
+# 操作系统
+# ============================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ============================================
+# 环境 / 密钥
+# ============================================
+.env
+.env.*
+*.pem
+*.key
+secrets/
+credentials.*
