@@ -24,8 +24,7 @@ LDFLAGS  += -lbcrypt -lole32 -lws2_32 -lsecur32 -lmfuuid -lstrmiids -luuid
 # ============================================================
 
 # APP: 主程序
-APP_SRCS := $(SRCDIR)/main.cpp \
-            $(SRCDIR)/core/encoder.cpp
+APP_SRCS := $(SRCDIR)/main.cpp
 
 # DIAG: 诊断工具（开发用，不发布）
 DIAG_SRCS := $(SRCDIR)/diag_main.cpp \
