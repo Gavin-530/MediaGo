@@ -104,8 +104,10 @@ conan/
 
 # ============================================
 # 第三方库 / SDK（头文件 + .lib 可以留，.dll 不提交）
+# 注：libs/nanosvg/ 作为源码级依赖需要入库，故不忽略整个 libs/
 # ============================================
-libs/
+libs/ffmpeg/
+libs/stb/
 external/
 third_party/
 vendor/
@@ -152,6 +154,7 @@ Output/
 # 测试（不提交）
 # ============================================
 tests/
+output/
 coverage/
 coverage_html/
 *.gcda
