@@ -1,6 +1,6 @@
 # MediaGo
 
-跨平台媒体处理工具，基于 FFmpeg + nanosvg 的轻量级音视频与图像处理方案。
+跨平台专业媒体处理工具，基于 FFmpeg + nanosvg 的轻量级音视频与图像处理方案。
 
 ## 设计理念
 
@@ -10,70 +10,165 @@ MediaGo 的核心思路是**用 FFmpeg 统一处理所有媒体类型**，避免
 - **矢量图**仅保留 nanosvg 处理 SVG（FFmpeg 本身不支持 SVG 解析），除此之外不引入任何图像库
 - **音视频**通过 FFmpeg avformat 读写容器、avcodec 编解码、avfilter 处理滤镜
 - **内存管理**全项目统一使用 `av_malloc` / `av_free`，杜绝 `malloc` / `stbi_image_free` 等混用导致的分配器不匹配
+- **配置驱动**分层配置架构，用户显式设置优先，未指定参数自动从源文件属性回填，保证处理严谨可控
 
-最终依赖极简：**只有 FFmpeg + nanosvg 两个头文件**，没有其他第三方运行时依赖。
+最终依赖：**FFmpeg + nanosvg + nlohmann/json**，无其他第三方运行时依赖。
 
 ## 架构
 
 ```
-┌───────────────────────────────────────────────┐
-│                CLI / 未来 GUI 入口              │
-│         src/main.cpp  /  diag_main.cpp         │
-├───────────────┬───────────────┬───────────────┤
-│   media_io    │  transcoder   │     diag      │
-│  统一媒体 I/O  │  转码引擎     │   FFmpeg 诊断  │
-├───────────────┴───────────────┴───────────────┤
-│              FFmpeg (avcodec / avformat         │
-│           avfilter / swscale / swresample)      │
-│          + nanosvg (SVG 解析 / 光栅化)          │
-└───────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                  CLI / 未来 GUI 入口                   │
+│           src/main.cpp  /  diag_main.cpp              │
+├──────────┬──────────┬───────────────┬───────────────┤
+│  config  │ media_io │  transcoder   │     diag      │
+│  配置模块 │ 媒体 I/O │  转码引擎     │  FFmpeg 诊断   │
+├──────────┴──────────┴───────────────┴───────────────┤
+│         FFmpeg (avcodec / avformat / avfilter         │
+│              swscale / swresample / avutil)           │
+│     + nanosvg (SVG 解析 / 光栅化)                     │
+│     + nlohmann/json (配置序列化)                       │
+└──────────────────────────────────────────────────────┘
 ```
 
-三个核心模块，各司其职：
+四个核心模块，各司其职：
 
 | 模块 | 职责 | 依赖 |
 |------|------|------|
-| `media_io` | 图像解码（任意格式→RGBA）、PNG/JPEG 编码、SVG 光栅化 | FFmpeg + nanosvg |
-| `transcoder` | 容器转换（remux）、图片格式互转 | FFmpeg + media_io |
+| `config` | 分层配置管理、编解码器/像素格式枚举、JSON 序列化 | FFmpeg + nlohmann/json |
+| `media_io` | 媒体探测、可配置像素格式解码、统一编码、SVG 光栅化、bit-exact 流拷贝 | FFmpeg + nanosvg |
+| `transcoder` | 统一处理流水线：探测 → 配置解析 → 决策(COPY/ENCODE) → 执行 | FFmpeg + media_io + config |
 | `diag` | FFmpeg 版本/配置/硬解/VMAF 环境诊断 | FFmpeg |
+
+## 统一处理流水线
+
+```
+输入文件
+  │
+  ├─ 1. Probe ─── media_probe() 获取源文件完整属性
+  │     (编解码器 / 像素格式 / 位深 / 色彩空间 / ICC / 元数据)
+  │
+  ├─ 2. Resolve ─ 用户设置 > 格式预设 > 全局默认 > 源属性回填
+  │     "所选即所得，不选则保持原始"
+  │
+  ├─ 3. Decide ── 根据 Strategy 决策执行路径
+  │     ├─ COPY   → bit-exact 流拷贝（零质量损失）
+  │     ├─ ENCODE → 解码 → 中间帧 → 编码（全参数可控）
+  │     └─ AUTO   → 同格式兼容 → COPY；否则 → ENCODE
+  │
+  └─ 4. Execute ─ 执行并返回 ProcessReport
+        (实际路径 / 源属性 / 输出属性)
+```
+
+### 配置优先级
+
+```
+CLI 参数 (最高)  >  JSON 配置文件  >  全局默认  >  源文件属性采样 (兜底)
+```
+
+所有未指定参数（`nullptr` / `-1` / `AUTO`）均从源文件自动提取，保证**不选则保持原始**。
 
 ## 模块 API
 
-### media_io — 统一媒体 I/O
-
-所有图像操作统一走 RGBA 像素缓冲区，调用方无需关心原始格式。
+### config — 配置模块
 
 ```cpp
-// 解码任意光栅图像 → RGBA
-uint8_t* media_load(const char* path, int* w, int* h);
+// 处理策略
+enum class Strategy { COPY = 0, ENCODE = 1, AUTO = 2 };
 
-// 编码 RGBA → PNG / JPEG
-bool media_save_png(const char* path, int w, int h, const uint8_t* data);
-bool media_save_jpg(const char* path, int w, int h, const uint8_t* data, int quality);
+// 编码参数（未指定字段从源回填）
+struct CodecParams {
+    const char* name = nullptr;       // 编码器名，nullptr = 自动
+    const char* pixel_fmt = nullptr;  // 像素格式，nullptr = 与源一致
+    int quality = -1;                 // 质量，-1 = 自动
+    int bitrate = 0;
+    int gop_size = 0;
+    int thread_count = 0;
+};
 
-// SVG 解析 + 光栅化 → RGBA
-uint8_t* svg_rasterize(const char* path, int w, int h);
+// 图片配置
+struct ImageConfig {
+    Strategy strategy = Strategy::AUTO;
+    const char* intermediate_fmt = nullptr;  // 中间格式，nullptr = 与源一致
+    ScaleMode scale_mode = ScaleMode::NONE;
+    int scale_w = 0, scale_h = 0;
+    ScaleAlgorithm scale_algorithm = ScaleAlgorithm::LANCZOS;
+    CodecParams encode;
+    bool preserve_icc = true;
+    bool preserve_metadata = true;
+};
 
-// 释放以上函数返回的内存
+// 全局配置
+struct MediaGoConfig {
+    ImageConfig image;
+    VideoConfig video;   // Phase 3 预留
+    AudioConfig audio;   // Phase 3 预留
+
+    bool from_json(const char* path);
+    bool to_json(const char* path) const;
+    void print(FILE* fp = stdout) const;
+};
+
+// FFmpeg 环境枚举（供 UI/CLI 展示可选参数）
+int config_list_codecs(CodecInfo* out, int max, bool encoders_only, bool video_only);
+int config_list_pixel_fmts(PixelFmtInfo* out, int max);
+```
+
+### media_io — 统一媒体 I/O
+
+```cpp
+// 源文件属性
+struct SourceInfo {
+    char codec_name[64];
+    int codec_id, width, height, bit_depth;
+    AVPixelFormat pix_fmt;
+    char pix_fmt_name[32], container[32];
+    int color_space, color_range, color_primaries, color_trc;
+    bool has_icc, has_alpha;
+    int nb_streams;
+    bool is_image;
+};
+
+// 探测（不解码像素）
+bool media_probe(const char* path, SourceInfo* info);
+
+// 解码到指定像素格式（AV_PIX_FMT_NONE = 保留源格式）
+bool media_decode(const char* path, AVPixelFormat dst_fmt, AVFrame** frame_out);
+
+// 统一编码（编码器/质量/格式由 ImageConfig 控制）
+bool media_encode(const char* path, const AVFrame* frame, const ImageConfig& cfg);
+
+// bit-exact 流拷贝（无质量损失）
+bool media_stream_copy(const char* input, const char* output);
+
+// SVG 光栅化（支持 fit/fill/stretch 缩放模式）
+uint8_t* svg_rasterize_ex(const char* path, ScaleMode mode,
+                           int w, int h, int* w_out, int* h_out);
 void media_free(uint8_t* data);
 ```
 
-`media_load` 内部通过 `avformat_open_input` 自动探测格式 → `avcodec` 解码 → `sws_scale` 转 RGBA。只要 FFmpeg 支持的格式即可解码，无需白名单。
-
-### transcoder — 转码引擎
+### transcoder — 统一流水线
 
 ```cpp
 struct TranscodeResult { bool ok; const char* error; };
 
-// 容器格式转换（流复制，不重新编码）
-TranscodeResult transcode_media(const char* input, const char* output);
+struct ProcessReport {
+    bool ok;
+    const char* error;
+    bool used_copy;          // true = stream copy；false = decode → encode
+    char src_codec[64];
+    int  src_width, src_height, src_bit_depth;
+    char src_pix_fmt[32];
+    char out_codec[64];
+    int  out_width, out_height;
+    char out_pix_fmt[32];
+};
 
-// 图片格式转换（根据扩展名自动选择编码路径）
-TranscodeResult convert_image(const char* input, const char* output);
+// 统一处理入口
+TranscodeResult process_media(const char* input, const char* output,
+                               const ImageConfig& cfg,
+                               ProcessReport* report = nullptr);
 ```
-
-- `transcode_media`：打开输入 → 探测流信息 → 根据输出扩展名创建容器 → 流复制所有 track → 写文件。支持 MP4 / MKV / WebM / AVI / FLV 等。
-- `convert_image`：PNG ↔ JPEG 直接走 `media_save`；其他格式回退到 `transcode_media` 处理。
 
 ### diag — FFmpeg 诊断
 
@@ -89,21 +184,28 @@ void diag_run_all();  // 完整报告：FFmpeg 版本、编译配置、硬件编
 |------|--------|----------|
 | Windows | MinGW-w64 g++ 8.1+ (C++17) | GNU Make |
 
-FFmpeg 通过 `scripts/setup_ffmpeg.ps1` 自动下载 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) 的 win64 gpl-shared 预编译包（含 libx264 / libx265 / libvmaf），解压到 `libs/ffmpeg/`。
+### 依赖获取
 
-nanosvg 是纯头文件库（`libs/nanosvg/nanosvg.h` + `nanosvgrast.h`），直接 `#include` 编译，无需额外下载。
+| 依赖 | 获取方式 |
+|------|---------|
+| FFmpeg | `powershell -File scripts/setup_ffmpeg.ps1` 自动下载 BtbN win64 gpl-shared 预编译包 |
+| nanosvg | 已内嵌于 `libs/nanosvg/`，纯头文件，无需额外操作 |
+| nlohmann/json | 已内嵌于 `libs/nlohmann/`，单头文件，无需额外操作 |
 
 ### 快速开始
 
 ```powershell
-# 1. 下载 FFmpeg 开发包（头文件 + 导入库）
+# 1. 下载 FFmpeg 开发包
 powershell -ExecutionPolicy Bypass -File scripts/setup_ffmpeg.ps1
 
 # 2. 编译
 mingw32-make
 
-# 3. 验证 FFmpeg 环境
-mingw32-make run   # 等价于 build/MediaGo.exe info
+# 3. 复制运行时 DLL（当前使用 shared 构建）
+Copy-Item libs/ffmpeg/bin/*.dll build/ -Force
+
+# 4. 验证
+./build/MediaGo.exe info
 ```
 
 ### 构建目标
@@ -117,21 +219,55 @@ mingw32-make run   # 等价于 build/MediaGo.exe info
 
 ## 使用
 
+### 核心命令
+
 ```powershell
-# 环境诊断（FFmpeg 版本、可用硬编解码器、VMAF）
-MediaGo info
+# 统一媒体转换（图片格式互转 / 容器转封装）
+MediaGo convert input.png output.webp
+MediaGo convert input.jpg output.png --quality 85
+MediaGo convert input.jpg output.jpg --strategy copy      # bit-exact 流拷贝
+MediaGo convert input.png output.jpg --codec mjpeg --pixfmt yuvj420p
+MediaGo convert input.svg output.png --scale 1920x1080 --scalemode fit
+MediaGo convert input.mkv output.mp4 --strategy copy       # 容器转封装
 
-# 解码任意图片（自动检测格式，输出宽高）
-MediaGo load photo.jpg
+# 源文件属性探测
+MediaGo probe photo.heic
 
-# SVG → 指定尺寸 RGBA 光栅化
-MediaGo svg icon.svg 256 256
+# 列出可用编解码器
+MediaGo codecs                   # 视频编码器
+MediaGo codecs audio             # 音频编码器
 
-# 图片格式转换（根据扩展名自动选择编码器）
-MediaGo img input.png output.jpg
+# 列出可用像素格式
+MediaGo pixfmts
 
-# 容器格式转换（流复制，快速无损）
-MediaGo remux input.mkv output.mp4
+# 配置管理
+MediaGo config                   # 查看当前默认配置
+MediaGo config export my.json    # 导出配置
+MediaGo config load my.json      # 加载配置
+```
+
+### convert 选项
+
+| 选项 | 值 | 说明 |
+|------|-----|------|
+| `--strategy` | `copy` / `encode` / `auto` | 处理策略（默认: auto） |
+| `--codec` | `<name>` | 指定编码器（如 `libx265`, `png`, `mjpeg`） |
+| `--quality` | `<1-100>` | 质量参数 |
+| `--pixfmt` | `<fmt>` | 目标像素格式（如 `yuv420p`, `rgb24`） |
+| `--intermediate` | `<fmt>` | 中间像素格式（默认与源一致） |
+| `--scale` | `<WxH>` | 缩放尺寸 |
+| `--scalemode` | `fit` / `fill` / `stretch` | 缩放模式 |
+| `--scalealgo` | `lanczos` / `bilinear` / `bicubic` / `area` | 缩放算法 |
+| `--no-icc` | — | 丢弃 ICC 色彩配置文件 |
+| `--no-meta` | — | 丢弃元数据 |
+
+### 向后兼容命令
+
+```powershell
+MediaGo img    in.png out.jpg    # = convert --strategy auto
+MediaGo remux  in.mkv out.mp4    # = convert --strategy copy
+MediaGo load   photo.jpg         # 解码到 RGBA 并显示尺寸
+MediaGo svg    icon.svg 256 256  # SVG 光栅化
 ```
 
 ## 项目结构
@@ -139,94 +275,79 @@ MediaGo remux input.mkv output.mp4
 ```
 MediaGo/
 ├── src/
-│   ├── main.cpp                # CLI 入口（命令分发）
-│   ├── diag_main.cpp           # 诊断工具入口
+│   ├── main.cpp                 # CLI 入口（命令分发）
+│   ├── diag_main.cpp            # 诊断工具入口
 │   └── core/
-│       ├── media_io.h          # 统一媒体 I/O 接口
-│       ├── media_io.cpp        # FFmpeg 光栅图 + nanosvg 矢量图实现
-│       ├── transcoder.h        # 转码引擎接口
-│       ├── transcoder.cpp      # remux + 图片格式转换实现
-│       ├── diag.h              # FFmpeg 诊断接口
-│       └── diag.cpp            # 诊断实现
+│       ├── config.h             # 配置数据结构与枚举接口
+│       ├── config.cpp           # JSON 读写 + FFmpeg 编解码器/像素格式枚举
+│       ├── media_io.h           # 统一媒体 I/O 接口
+│       ├── media_io.cpp         # 探测 / 可配置解码 / 统一编码 / 流拷贝 / SVG
+│       ├── transcoder.h         # 统一流水线接口
+│       ├── transcoder.cpp       # probe → resolve → decide → execute
+│       ├── diag.h               # FFmpeg 诊断接口
+│       └── diag.cpp             # 诊断实现
 ├── libs/
-│   └── nanosvg/                # 源码级依赖（zlib 许可）
-│       ├── nanosvg.h           # SVG 解析
-│       └── nanosvgrast.h       # 软件光栅化
+│   ├── nanosvg/                 # 源码级依赖（zlib 许可）
+│   │   ├── nanosvg.h            # SVG 解析
+│   │   └── nanosvgrast.h        # 软件光栅化
+│   └── nlohmann/
+│       └── json.hpp             # JSON 序列化（MIT 许可，单头文件）
 ├── scripts/
-│   └── setup_ffmpeg.ps1        # FFmpeg 开发包下载
-├── Makefile                    # MinGW 构建
-└── .gitignore
+│   └── setup_ffmpeg.ps1         # FFmpeg 开发包下载脚本
+├── Makefile                     # MinGW 构建
+├── .gitignore
+└── README.md
 ```
-
-`.gitignore` 已排除 `build/`（编译产物）、`libs/ffmpeg/`（预编译包）、`tests/`（内部测试），仓库只保留源码和项目配置。
 
 ## FFmpeg 模块
 
-本项目链接 6 个 FFmpeg 库，各模块按需使用：
-
-| 库 | 被哪些模块使用 | 用途 |
-|----|---------------|------|
-| libavcodec | media_io, transcoder | 图像编解码、音频编解码 |
+| 库 | 使用模块 | 用途 |
+|----|---------|------|
+| libavcodec | media_io, transcoder, config | 图像/音频编解码、编解码器枚举 |
 | libavformat | media_io, transcoder | 容器读写、流探测、格式检测 |
-| libavutil | media_io, transcoder | 内存 (`av_malloc`)、像素格式、帧操作 |
-| libswscale | media_io | 像素格式转换（任意→RGBA） |
+| libavutil | media_io, transcoder, config | 内存管理、像素格式、帧操作 |
+| libswscale | media_io, transcoder | 像素格式转换、缩放 |
 | libswresample | transcoder | 音频重采样 |
-| libavfilter | — (预留) | 滤镜图（PSNR/SSIM/VMAF 已通过测试验证可用） |
+| libavfilter | diag | 滤镜图（VMAF 检测；PSNR/SSIM 已通过测试验证） |
 
 ## 路线图
 
-当前已完成基础架构和核心功能，以下是后续开发路径。
-
 ### 第一阶段：跨平台构建
 
-> **从这里继续：将 MinGW Makefile 迁移到 CMake**
+> 将 MinGW Makefile 迁移到 CMake
 
-- 当前 Makefile 仅支持 Windows + MinGW。CMake 可以统一 Windows / macOS / Linux 三平台的构建流程
-- FFmpeg 在所有主流平台都有预编译包（BtbN/FFmpeg-Builds 提供 Windows，Homebrew 提供 macOS，apt 提供 Linux），CMake 的 `find_package` 可以自动定位
-- nanosvg 是纯 C 头文件，零移植成本
-- 改动量：新增 `CMakeLists.txt`，`src/core/` 代码无需修改
+- CMake 统一 Windows / macOS / Linux 三平台构建
+- FFmpeg 在所有主流平台都有预编译包
+- nanosvg / nlohmann/json 纯头文件，零移植成本
 
-```
-# 迁移后的典型构建流程：
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-```
+### 第二阶段：静态链接
 
-### 第二阶段：独立可执行文件
+> 单个可执行文件，无需用户单独安装 FFmpeg
 
-> **目标：一个 exe / app 包即可分发，无需用户单独安装 FFmpeg**
+- FFmpeg 静态链接到 MediaGo
+- 拷贝即用，零外部依赖
 
-- FFmpeg 静态链接：将 `avcodec` / `avformat` 等库编译进 `MediaGo`，不再依赖外部 DLL
-- BtbN 同时提供 gpl-shared 和 gpl 静态版本，只需在 CMake 中配置静态链接即可
-- nanosvg 已是源码编译，天然静态
-- 最终产物是单个可执行文件，拷贝即用
+### 第三阶段：完整转码引擎
 
-### 第三阶段：转码引擎
+> re-encode 模式 + 编解码器选择策略
 
-> **当前只实现了 remux（流复制），需要增加完整的编解码转码**
-
-- 新增 `transcode_media` 的 re-encode 模式：指定输出编码器和参数，将输入流解码后重新编码
-- 拆分 codec 匹配逻辑：自动选择最佳编码器（软件/硬件优先策略）
-- 支持视频滤镜链：缩放、裁剪、帧率转换、去隔行
+- 视频/音频完整编解码管线
+- 软件/硬件编码器自动选择与优先级策略
+- 视频滤镜链：缩放、裁剪、帧率转换、去隔行
 
 ### 第四阶段：媒体元数据
 
-- 新增 `core/metadata` 模块：读取/写入媒体文件的元数据（标题、作者、封面、章节等）
-- FFmpeg 的 `AVDictionary` API 直接支持，无需额外依赖
-- 支持 ID3 (MP3)、EXIF (JPEG)、QuickTime (MP4/MOV)、Matroska (MKV/WebM) 等元数据格式
+> EXIF / ID3 / QuickTime / Matroska 元数据读写
+
+- 基于 FFmpeg `AVDictionary` API
+- 零额外依赖
 
 ### 第五阶段：图形界面
 
-> **CLI 稳定后，包装为跨平台 GUI 应用**
+> Qt 6 跨平台 GUI
 
-- 推荐 Qt 6（LGPL 许可，与 GPL 兼容）：`QProcess` 调用 CLI 后端，或直接链接核心模块
-- 核心层 `media_io` / `transcoder` 与界面完全解耦，可单独编译为静态库供 GUI 调用
-- GUI 负责：文件选择、格式/参数配置、进度条、预览
-
-### 格式支持扩展
-
-- `media_save` 当前只实现了 PNG/JPEG 编码。后续可补充 WebP、AVIF 编码（FFmpeg codec 已内置）
-- SVG 光栅化输出当前只返回 RGBA 内存，可增加直接保存为 PNG 的便捷接口
+- 核心模块与界面完全解耦
+- 文件选择、参数配置、进度条、预览
 
 ## 许可
 
@@ -234,6 +355,5 @@ cmake --build build
 |------|------|
 | FFmpeg | LGPL / GPL（取决于编译选项） |
 | nanosvg | zlib |
+| nlohmann/json | MIT |
 | MediaGo 自身 | GPL |
-
-`libs/nanosvg/` 是源码级依赖，仅两个头文件约 4800 行，编译时直接嵌入。FFmpeg 不纳入仓库，通过脚本下载预编译包。
