@@ -19,6 +19,7 @@
 #include "core/media_io.h"
 #include "core/transcoder.h"
 #include "core/diag.h"
+#include "core/batch.h"
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -33,6 +34,7 @@ static void print_usage() {
     puts("MediaGo - 专业媒体处理工具\n");
     puts("核心命令:");
     puts("  convert <in> <out> [options]  统一媒体转换（图片/容器）");
+    puts("  batch   <manifest.json>       批量处理（从清单文件执行多任务）");
     puts("  probe   <file>                查看源文件完整属性");
     puts("  codecs  [video|audio]         列出可用编解码器");
     puts("  pixfmts                       列出可用像素格式");
@@ -53,6 +55,7 @@ static void print_usage() {
     puts("  remux  <in> <out>              容器转封装 (=convert --strategy copy)");
     puts("  load   <file>                  解码图片到 RGBA 像素");
     puts("  svg    <file> <w> <h>          SVG 光栅化");
+    puts("\nbatch 清单格式见 src/core/batch.h 头部注释，或运行: MediaGo config export 生成模板");
 }
 
 // ============================================================
@@ -292,6 +295,30 @@ static int cmd_config(int argc, char** argv) {
 }
 
 // ============================================================
+// batch 命令
+// ============================================================
+
+static int cmd_batch(int argc, char** argv) {
+    if (argc < 3) {
+        fprintf(stderr, "用法: MediaGo batch <manifest.json>\n");
+        fprintf(stderr, "\n清单文件格式示例:\n");
+        fprintf(stderr, "  {\n");
+        fprintf(stderr, "    \"version\": 1,\n");
+        fprintf(stderr, "    \"output\": { \"dir\": \"./output\", \"structure\": \"by_type\" },\n");
+        fprintf(stderr, "    \"defaults\": { \"strategy\": \"auto\", \"quality\": 80 },\n");
+        fprintf(stderr, "    \"jobs\": [\n");
+        fprintf(stderr, "      { \"input\": \"video.mp4\", \"params\": { \"codec\": \"libx265\" } },\n");
+        fprintf(stderr, "      { \"input\": \"images/*.jpg\", \"output\": \"thumbs/\" }\n");
+        fprintf(stderr, "    ]\n");
+        fprintf(stderr, "  }\n");
+        return 1;
+    }
+
+    BatchProcessor bp;
+    return bp.process(argv[2]) ? 0 : 1;
+}
+
+// ============================================================
 // 主入口
 // ============================================================
 
@@ -309,6 +336,7 @@ int main(int argc, char** argv) {
     if (!strcmp(cmd, "codecs"))  return cmd_codecs(argc, argv);
     if (!strcmp(cmd, "pixfmts")) return cmd_pixfmts(argc, argv);
     if (!strcmp(cmd, "config"))  return cmd_config(argc, argv);
+    if (!strcmp(cmd, "batch"))   return cmd_batch(argc, argv);
     if (!strcmp(cmd, "info")) {
         diag_run_all();
         return 0;

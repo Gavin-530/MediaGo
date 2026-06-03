@@ -31,7 +31,8 @@ APP_SRCS := $(SRCDIR)/main.cpp \
             $(SRCDIR)/core/config.cpp \
             $(SRCDIR)/core/media_io.cpp \
             $(SRCDIR)/core/transcoder.cpp \
-            $(SRCDIR)/core/diag.cpp
+            $(SRCDIR)/core/diag.cpp \
+            $(SRCDIR)/core/batch.cpp
 
 # DIAG: 诊断工具（开发用，不发布）
 DIAG_SRCS := $(SRCDIR)/diag_main.cpp \

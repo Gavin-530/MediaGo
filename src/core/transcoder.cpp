@@ -176,13 +176,70 @@ TranscodeResult process_media(const char* input, const char* output,
         // 4c. 缩放（如果配置了缩放）
         AVFrame* scaled_frame = frame;
         if (resolved.scale_w > 0 || resolved.scale_h > 0) {
-            int tw = resolved.scale_w > 0 ? resolved.scale_w : frame->width;
-            int th = resolved.scale_h > 0 ? resolved.scale_h : frame->height;
+            int src_w = frame->width;
+            int src_h = frame->height;
+            int tw, th;
+
+            if (resolved.scale_mode == ScaleMode::NONE) {
+                // NONE：忽略缩放参数，保持原尺寸
+                tw = src_w;
+                th = src_h;
+            } else if (resolved.scale_mode == ScaleMode::STRETCH) {
+                // STRETCH：拉伸到目标尺寸，无视宽高比
+                tw = resolved.scale_w > 0 ? resolved.scale_w : src_w;
+                th = resolved.scale_h > 0 ? resolved.scale_h : src_h;
+            } else {
+                // FIT / FILL：等比缩放，保持宽高比
+                int limit_w = resolved.scale_w > 0 ? resolved.scale_w : src_w;
+                int limit_h = resolved.scale_h > 0 ? resolved.scale_h : src_h;
+
+                double rx = (double)limit_w / src_w;
+                double ry = (double)limit_h / src_h;
+                double r;
+
+                // 如果只指定了一维，直接按该维比例缩放
+                if (resolved.scale_w <= 0) {
+                    r = (double)limit_h / src_h;
+                } else if (resolved.scale_h <= 0) {
+                    r = (double)limit_w / src_w;
+                } else {
+                    // 两维都指定：FIT 取较小比例，FILL 取较大比例
+                    r = (resolved.scale_mode == ScaleMode::FILL)
+                        ? (rx > ry ? rx : ry)
+                        : (rx < ry ? rx : ry);
+                }
+
+                tw = (int)(src_w * r + 0.5);
+                th = (int)(src_h * r + 0.5);
+                if (tw < 1) tw = 1;
+                if (th < 1) th = 1;
+            }
+
+            // 尺寸未变化则跳过缩放
+            if (tw == src_w && th == src_h)
+                goto skip_scale;
 
             scaled_frame = av_frame_alloc();
             scaled_frame->width  = tw;
             scaled_frame->height = th;
-            scaled_frame->format = frame->format;
+
+            // 确定缩放的输出像素格式
+            // swscale 不支持 Bayer 等 raw 格式作为输出 → 需要选一个合适的中间格式
+            AVPixelFormat scale_out_fmt = (AVPixelFormat)frame->format;
+            const char* src_fmt_name = av_get_pix_fmt_name(scale_out_fmt);
+            bool is_bayer = (src_fmt_name && strstr(src_fmt_name, "bayer"));
+            if (is_bayer) {
+                // 优先使用编码器指定的像素格式，否则用 RGB24
+                if (resolved.encode.pixel_fmt && resolved.encode.pixel_fmt[0]) {
+                    scale_out_fmt = av_get_pix_fmt(resolved.encode.pixel_fmt);
+                    if (scale_out_fmt == AV_PIX_FMT_NONE)
+                        scale_out_fmt = AV_PIX_FMT_RGB24;
+                } else {
+                    scale_out_fmt = AV_PIX_FMT_RGB24;
+                }
+            }
+
+            scaled_frame->format = scale_out_fmt;
 
             // 传递色彩元数据
             scaled_frame->colorspace     = frame->colorspace;
@@ -194,12 +251,12 @@ TranscodeResult process_media(const char* input, const char* output,
 
             int flags = static_cast<int>(resolved.scale_algorithm);
             SwsContext* sws = sws_getContext(
-                frame->width, frame->height, (AVPixelFormat)frame->format,
-                tw, th, (AVPixelFormat)frame->format,
+                src_w, src_h, (AVPixelFormat)frame->format,
+                tw, th, scale_out_fmt,
                 flags, nullptr, nullptr, nullptr);
 
             if (sws) {
-                sws_scale(sws, frame->data, frame->linesize, 0, frame->height,
+                sws_scale(sws, frame->data, frame->linesize, 0, src_h,
                           scaled_frame->data, scaled_frame->linesize);
                 sws_freeContext(sws);
             } else {
@@ -207,6 +264,7 @@ TranscodeResult process_media(const char* input, const char* output,
                 scaled_frame = frame; // fallback to original
             }
         }
+        skip_scale:
 
         // 4d. 编码
         if (resolved.encode.quality < 0 && src.pix_fmt != AV_PIX_FMT_NONE) {

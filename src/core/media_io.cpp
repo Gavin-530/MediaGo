@@ -8,7 +8,6 @@
 //   - media_decode：支持配置目标像素格式，AV_PIX_FMT_NONE=保留源格式
 //   - media_encode：统一编码接口，编码器/质量/格式全由 Config 控制
 //   - media_stream_copy：同格式 bit-exact 拷贝
-//   - svg_rasterize_ex：接受 ScaleConfig，支持 fit/fill/stretch 模式
 
 #define NANOSVG_IMPLEMENTATION
 #define NANOSVGRAST_IMPLEMENTATION
@@ -20,6 +19,9 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/mem.h>
 #include <libavutil/opt.h>
@@ -30,6 +32,8 @@ extern "C" {
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
 // ============================================================
 // 内部辅助
@@ -129,6 +133,189 @@ bool media_probe(const char* path, SourceInfo* info) {
 }
 
 // ============================================================
+// Tile Grid 解码：使用 xstack 滤镜拼接瓦片网格（如 iPhone HEIF）
+// ============================================================
+
+// 解码单个流的一帧
+static AVFrame* decode_one_stream_frame(AVFormatContext* fmt_ctx, int idx,
+                                         AVCodecContext* dec_ctx) {
+    AVFrame* frame = av_frame_alloc();
+    if (!frame) return nullptr;
+
+    AVPacket* pkt = av_packet_alloc();
+    bool got_frame = false;
+
+    while (!got_frame && av_read_frame(fmt_ctx, pkt) >= 0) {
+        if (pkt->stream_index != idx) {
+            av_packet_unref(pkt);
+            continue;
+        }
+        if (avcodec_send_packet(dec_ctx, pkt) >= 0) {
+            if (avcodec_receive_frame(dec_ctx, frame) >= 0)
+                got_frame = true;
+        }
+        av_packet_unref(pkt);
+    }
+    av_packet_free(&pkt);
+
+    if (!got_frame) {
+        av_frame_free(&frame);
+        return nullptr;
+    }
+    return frame;
+}
+
+// 使用 xstack 拼接 tile grid 中的所有瓦片
+static AVFrame* assemble_tile_grid(AVFormatContext* fmt_ctx,
+                                    AVStreamGroup* stg,
+                                    AVPixelFormat dst_fmt) {
+    const AVStreamGroupTileGrid* grid = stg->params.tile_grid;
+    unsigned nb_tiles = grid->nb_tiles;
+    if (nb_tiles < 1 || nb_tiles > 64) return nullptr;
+
+    // 1. 解码每个瓦片流的一帧
+    std::vector<AVFrame*> tile_frames(nb_tiles, nullptr);
+    std::vector<AVCodecContext*> dec_ctxs(nb_tiles, nullptr);
+
+    for (unsigned i = 0; i < nb_tiles; i++) {
+        unsigned stream_idx_in_group = grid->offsets[i].idx;
+
+        if (stream_idx_in_group >= stg->nb_streams) continue;
+
+        AVStream* st = stg->streams[stream_idx_in_group];
+        const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
+        if (!codec) continue;
+
+        AVCodecContext* ctx = avcodec_alloc_context3(codec);
+        if (!ctx) continue;
+        avcodec_parameters_to_context(ctx, st->codecpar);
+        if (avcodec_open2(ctx, codec, nullptr) < 0) {
+            avcodec_free_context(&ctx);
+            continue;
+        }
+
+        dec_ctxs[i] = ctx;
+        tile_frames[i] = decode_one_stream_frame(fmt_ctx, st->index, ctx);
+    }
+
+    // 检查是否所有瓦片都解码成功
+    bool all_ok = true;
+    for (unsigned i = 0; i < nb_tiles; i++) {
+        if (!tile_frames[i]) { all_ok = false; break; }
+    }
+
+    // 2. 构建 xstack 滤镜图
+    AVFrame* result = nullptr;
+
+    if (all_ok) {
+        AVFilterGraph* fg = avfilter_graph_alloc();
+        AVFilterContext* xstack_ctx = nullptr;
+        AVFilterContext* sinksink_ctx = nullptr;
+
+        // 生成 layout 字符串，如 "0_0|3520_0|0_1600|..."
+        std::string layout;
+        for (unsigned i = 0; i < nb_tiles; i++) {
+            if (i > 0) layout += "|";
+            layout += std::to_string(grid->offsets[i].horizontal)
+                    + "_" + std::to_string(grid->offsets[i].vertical);
+        }
+
+        char xstack_args[1024];
+        snprintf(xstack_args, sizeof(xstack_args),
+                 "inputs=%u:layout=%s:fill=black",
+                 nb_tiles, layout.c_str());
+
+        if (avfilter_graph_create_filter(&xstack_ctx,
+                avfilter_get_by_name("xstack"), "xstack",
+                xstack_args, nullptr, fg) >= 0) {
+
+            if (avfilter_graph_create_filter(&sinksink_ctx,
+                    avfilter_get_by_name("buffersink"), "sink",
+                    nullptr, nullptr, fg) >= 0) {
+
+                // 为每个瓦片创建 buffersrc 并连接到 xstack
+                bool link_ok = true;
+                for (unsigned i = 0; i < nb_tiles && link_ok; i++) {
+                    AVFrame* tile = tile_frames[i];
+                    char src_name[32];
+                    snprintf(src_name, sizeof(src_name), "src%u", i);
+
+                    char src_args[256];
+                    snprintf(src_args, sizeof(src_args),
+                             "video_size=%dx%d:pix_fmt=%d:time_base=1/1",
+                             tile->width, tile->height, tile->format);
+
+                    AVFilterContext* src_ctx = nullptr;
+                    if (avfilter_graph_create_filter(&src_ctx,
+                            avfilter_get_by_name("buffer"), src_name,
+                            src_args, nullptr, fg) < 0) {
+                        link_ok = false; break;
+                    }
+                    if (avfilter_link(src_ctx, 0, xstack_ctx, (unsigned)i) < 0) {
+                        link_ok = false; break;
+                    }
+                }
+
+                if (link_ok && avfilter_link(xstack_ctx, 0, sinksink_ctx, 0) >= 0
+                    && avfilter_graph_config(fg, nullptr) >= 0) {
+
+                    // 投喂各瓦片帧
+                    for (unsigned i = 0; i < nb_tiles; i++) {
+                        AVFilterContext* src_ctx = avfilter_graph_get_filter(fg,
+                            (std::string("src") + std::to_string(i)).c_str());
+                        if (src_ctx)
+                            av_buffersrc_add_frame(src_ctx, tile_frames[i]);
+                    }
+
+                    result = av_frame_alloc();
+                    if (av_buffersink_get_frame(sinksink_ctx, result) < 0) {
+                        av_frame_free(&result);
+                    }
+                }
+            }
+        }
+        avfilter_graph_free(&fg);
+    }
+
+    // 3. 清理
+    for (unsigned i = 0; i < nb_tiles; i++) {
+        if (tile_frames[i]) av_frame_free(&tile_frames[i]);
+        if (dec_ctxs[i])   avcodec_free_context(&dec_ctxs[i]);
+    }
+
+    // 4. 如果需要，转换像素格式
+    if (result && dst_fmt != AV_PIX_FMT_NONE
+        && dst_fmt != (AVPixelFormat)result->format) {
+        AVFrame* converted = av_frame_alloc();
+        converted->width  = result->width;
+        converted->height = result->height;
+        converted->format = dst_fmt;
+        converted->colorspace     = result->colorspace;
+        converted->color_range     = result->color_range;
+        converted->color_primaries = result->color_primaries;
+        converted->color_trc       = result->color_trc;
+        av_frame_get_buffer(converted, 0);
+
+        SwsContext* sws = sws_getContext(
+            result->width, result->height, (AVPixelFormat)result->format,
+            result->width, result->height, dst_fmt,
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
+
+        if (sws) {
+            sws_scale(sws, result->data, result->linesize, 0, result->height,
+                      converted->data, converted->linesize);
+            sws_freeContext(sws);
+            av_frame_free(&result);
+            result = converted;
+        } else {
+            av_frame_free(&converted);
+        }
+    }
+
+    return result;
+}
+
+// ============================================================
 // media_decode —— 解码到指定像素格式
 // ============================================================
 
@@ -145,8 +332,63 @@ bool media_decode(const char* path, AVPixelFormat dst_fmt,
         return false;
     }
 
+    // 检测 Tile Grid 流组（如 iPhone HEIF 多瓦片图）：自动拼接
+    for (unsigned gi = 0; gi < fmt_ctx->nb_stream_groups; gi++) {
+        AVStreamGroup* stg = fmt_ctx->stream_groups[gi];
+        if (stg->type == AV_STREAM_GROUP_PARAMS_TILE_GRID) {
+            const AVStreamGroupTileGrid* grid = stg->params.tile_grid;
+            fprintf(stderr, "  [info] Tile grid detected: %u tiles, "
+                    "canvas %dx%d\n",
+                    grid->nb_tiles, grid->coded_width, grid->coded_height);
+
+            AVFrame* stitched = assemble_tile_grid(fmt_ctx, stg, dst_fmt);
+            if (stitched) {
+                *frame_out = stitched;
+                avformat_close_input(&fmt_ctx);
+                return true;
+            }
+            // 拼接失败则回退到普通解码路径
+            fprintf(stderr, "  [warn] Tile grid assembly failed, "
+                    "falling back to single-stream decode\n");
+            break;
+        }
+    }
+
+    // 选择最佳视频流：对于多流文件（如 HEIF），选分辨率最大的流
+    // av_find_best_stream 可能选到缩略图或分块图的某个 tile
     const AVCodec* dec = nullptr;
-    int stream_idx = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_VIDEO, -1, -1, &dec, 0);
+    int stream_idx = -1;
+    int best_area = 0;
+    int video_stream_count = 0;
+
+    for (unsigned i = 0; i < fmt_ctx->nb_streams; i++) {
+        AVStream* st = fmt_ctx->streams[i];
+        if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            video_stream_count++;
+            const AVCodec* c = avcodec_find_decoder(st->codecpar->codec_id);
+            if (c) {
+                int area = st->codecpar->width * st->codecpar->height;
+                if (area > best_area) {
+                    stream_idx = (int)i;
+                    best_area = area;
+                    dec = c;
+                }
+            }
+        }
+    }
+
+    // 回退：无视频流或找不到解码器时用 av_find_best_stream
+    if (stream_idx < 0) {
+        stream_idx = av_find_best_stream(fmt_ctx, AVMEDIA_TYPE_VIDEO,
+                                         -1, -1, &dec, 0);
+    }
+
+    if (video_stream_count > 1) {
+        fprintf(stderr, "  [info] %d video streams found, selected #%d (%dx%d)\n",
+                video_stream_count, stream_idx,
+                fmt_ctx->streams[stream_idx]->codecpar->width,
+                fmt_ctx->streams[stream_idx]->codecpar->height);
+    }
     if (stream_idx < 0 || !dec) {
         avformat_close_input(&fmt_ctx);
         return false;
@@ -182,6 +424,17 @@ bool media_decode(const char* path, AVPixelFormat dst_fmt,
 
         if (avcodec_receive_frame(dec_ctx, raw_frame) >= 0) {
             AVPixelFormat src_fmt = (AVPixelFormat)raw_frame->format;
+
+            // Bayer 原始格式检测：swscale 不支持去马赛克，颜色将严重错误
+            // 常见：bayer_rggb16le (DNG), bayer_bggr8, bayer_grbg16le 等
+            {
+                const char* fmt_name = av_get_pix_fmt_name(src_fmt);
+                if (fmt_name && strstr(fmt_name, "bayer")) {
+                    fprintf(stderr, "  [warn] Bayer raw format (%s) detected — "
+                            "colors will be wrong (demosaicing not supported)\n",
+                            fmt_name);
+                }
+            }
 
             // 如果目标格式为 NONE，直接使用解码器原始输出（不用 sws）
             if (dst_fmt == AV_PIX_FMT_NONE || dst_fmt == src_fmt) {
@@ -421,11 +674,21 @@ bool media_stream_copy(const char* input, const char* output) {
         if (in_st->codecpar->codec_type == AVMEDIA_TYPE_ATTACHMENT)
             continue;
 
+        // 兼容性预检：输出 muxer 是否支持此编码/流类型
+        // 这是 ffmpeg CLI -c copy 自动跳过不兼容流的关键步骤
+        if (avformat_query_codec(out_fmt->oformat,
+                                 in_st->codecpar->codec_id,
+                                 FF_COMPLIANCE_NORMAL) == 0) {
+            fprintf(stderr, "  [skip] stream #%d: codec not supported in output container\n", i);
+            continue;
+        }
+
         AVStream* out_st = avformat_new_stream(out_fmt, nullptr);
         if (!out_st) continue;
         if (avcodec_parameters_copy(out_st->codecpar, in_st->codecpar) < 0)
             continue;
 
+        // codec_tag 清零让 FFmpeg 为目标容器自动选择正确的 tag
         out_st->codecpar->codec_tag = 0;
         out_st->time_base = in_st->time_base;
         map[stream_count++] = (int)i;
