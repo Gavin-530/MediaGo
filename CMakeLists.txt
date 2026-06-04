@@ -63,6 +63,10 @@ target_include_directories(nlohmann_json INTERFACE "${CMAKE_SOURCE_DIR}/libs/nlo
 add_library(nanosvg INTERFACE)
 target_include_directories(nanosvg INTERFACE "${CMAKE_SOURCE_DIR}/libs/nanosvg")
 
+# cpp-httplib — HTTP 服务器（纯头文件）
+add_library(cpp_httplib INTERFACE)
+target_include_directories(cpp_httplib INTERFACE "${CMAKE_SOURCE_DIR}/libs/cpp-httplib")
+
 # ============================================================
 # 主程序
 # ============================================================
@@ -150,6 +154,85 @@ endif()
 # ============================================================
 
 option(BUILD_TESTING "构建开发工具" ON)
+
+# ============================================================
+# HTTP 服务端（供前端 GUI 调用）
+# ============================================================
+
+set(SERVER_SOURCES
+    src/main_server.cpp
+    src/server/http_server.cpp
+    src/core/config.cpp
+    src/core/media_io.cpp
+    src/core/transcode_engine.cpp
+    src/core/batch.cpp
+)
+
+add_executable(MediaGoServer ${SERVER_SOURCES})
+
+target_include_directories(MediaGoServer PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+    "${CMAKE_SOURCE_DIR}/libs"
+)
+
+target_link_libraries(MediaGoServer PRIVATE
+    FFmpeg::avcodec
+    FFmpeg::avformat
+    FFmpeg::avutil
+    FFmpeg::swscale
+    FFmpeg::swresample
+    FFmpeg::avfilter
+    nlohmann_json
+    nanosvg
+    cpp_httplib
+)
+
+if(WIN32)
+    target_compile_definitions(MediaGoServer PRIVATE _WIN32_WINNT=0x0A00)
+    target_link_libraries(MediaGoServer PRIVATE
+        bcrypt ole32 ws2_32 secur32 mfuuid strmiids uuid
+    )
+endif()
+
+if(APPLE)
+    target_link_libraries(MediaGoServer PRIVATE
+        "-framework CoreFoundation"
+        "-framework CoreVideo"
+        "-framework VideoToolbox"
+        "-framework CoreMedia"
+        "-framework AudioToolbox"
+    )
+endif()
+
+if(UNIX AND NOT APPLE)
+    find_package(Threads REQUIRED)
+    target_link_libraries(MediaGoServer PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+endif()
+
+if(NOT MSVC)
+    target_compile_options(MediaGoServer PRIVATE
+        -Wno-deprecated-declarations
+    )
+endif()
+
+# Windows: 拷贝 FFmpeg DLL
+if(WIN32 AND FFMPEG_LIBRARY_DIRS)
+    list(GET FFMPEG_LIBRARY_DIRS 0 _FFMPEG_LIB_DIR)
+    if(EXISTS "${_FFMPEG_LIB_DIR}/../bin")
+        set(_FFMPEG_BIN_DIR "${_FFMPEG_LIB_DIR}/../bin")
+    else()
+        set(_FFMPEG_BIN_DIR "${_FFMPEG_LIB_DIR}")
+    endif()
+
+    file(GLOB _FFMPEG_DLLS "${_FFMPEG_BIN_DIR}/*.dll")
+    foreach(_dll ${_FFMPEG_DLLS})
+        get_filename_component(_dll_name "${_dll}" NAME)
+        add_custom_command(TARGET MediaGoServer POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "$<TARGET_FILE_DIR:MediaGoServer>"
+            COMMENT "Copying FFmpeg DLL for server: ${_dll_name}"
+        )
+    endforeach()
+endif()
 
 if(BUILD_TESTING)
     enable_testing()

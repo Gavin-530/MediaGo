@@ -1,6 +1,6 @@
 # MediaGo
 
-跨平台专业媒体处理工具，基于原生 FFmpeg 管线的音视频、图像处理方案。适用于影视后期、数字资产管理、自动化转码流水线等工业场景。
+跨平台专业媒体处理工具，基于原生 FFmpeg 管线的音视频、图像处理方案。支持 **CLI 命令行** 和 **GUI 浏览器界面**，适用于影视后期、数字资产管理、自动化转码流水线等工业场景。
 
 ## 设计理念
 
@@ -11,29 +11,52 @@
 | **原生 FFmpeg** | 标准 `avformat → avcodec → avfilter → avcodec → avformat` 五阶段管线 |
 | **行业标准输出** | Lanczos 缩放、CRF 质量控制、色彩元数据完整传递 |
 | **单一路径** | 整个项目只有一条 TranscodeEngine 处理管线 |
+| **前后端分离** | C++ HTTP 服务层 + Vue 3 前端，大企业开发范式 |
 
 ## 架构
 
 ```
-CLI (src/main.cpp)
- │
- ├── convert ──→ transcode_run() ──→ TranscodeEngine
- │                                         │
- └── batch   ──→ BatchProcessor ───────────┘
-                                         │
-                    ┌────────────────────┘
-                    ▼
-              TranscodeEngine 五阶段管线
-              ┌──────────────────────────────────────┐
-              │ 1. avformat_open_input               │  打开输入
-              │ 2. avformat_find_stream_info         │  探测流属性
-              │ 3. 逐流决策 (COPY or ENCODE)         │  用户参数决定
-              │ 4. transcode_loop                    │  主循环
-              │    ├─ av_read_frame                  │  读包
-              │    ├─ COPY: av_interleaved_write     │  直写
-              │    └─ ENCODE: dec → filter → enc     │  解码/滤镜/编码
-              │ 5. flush + av_write_trailer          │  收尾
-              └──────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                         前端 GUI                                │
+│               Vue 3 + TypeScript + Element Plus                 │
+│                    http://localhost:5173                        │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │  REST API + SSE
+┌──────────────────────────▼──────────────────────────────────────┐
+│                    HTTP 服务层 (MediaGoServer)                   │
+│              cpp-httplib · REST · SSE 进度推送                  │
+│                    http://localhost:9527                        │
+├─────────────────────────────────────────────────────────────────┤
+│  POST /api/upload    │  多文件上传，保存临时目录                 │
+│  POST /api/batch     │  提交 JSON 清单，异步转码                 │
+│  GET  /api/progress  │  SSE 实时进度推送                        │
+│  GET  /api/probe     │  媒体属性探测                            │
+│  GET  /api/codecs    │  枚举可用编解码器                        │
+│  GET  /api/pixfmts   │  枚举可用像素格式                        │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────────┐
+│                     CLI (src/main.cpp)                          │
+│                                                                  │
+│  convert ──→ transcode_run() ──→ TranscodeEngine                │
+│  batch   ──→ BatchProcessor ───────────┘                        │
+│  probe   ──→ media_probe()                                      │
+│  codecs  ──→ config_list_codecs()                               │
+│  pixfmts ──→ config_list_pixel_fmts()                           │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+               TranscodeEngine 五阶段管线
+               ┌──────────────────────────────────────┐
+               │ 1. avformat_open_input               │  打开输入
+               │ 2. avformat_find_stream_info         │  探测流属性
+               │ 3. 逐流决策 (COPY or ENCODE)         │  用户参数决定
+               │ 4. transcode_loop                    │  主循环
+               │    ├─ av_read_frame                  │  读包
+               │    ├─ COPY: av_interleaved_write     │  直写
+               │    └─ ENCODE: dec → filter → enc     │  解码/滤镜/编码
+               │ 5. flush + av_write_trailer          │  收尾
+               └──────────────────────────────────────┘
 ```
 
 ## 项目结构
@@ -41,19 +64,42 @@ CLI (src/main.cpp)
 ```
 MediaGo/
 ├── src/
-│   ├── main.cpp                      CLI 入口
-│   └── core/
-│       ├── config.h / .cpp           缩放算法枚举、编解码器/像素格式运行时枚举
-│       ├── transcode_config.h        VideoConfig / AudioConfig / TranscodeConfig
-│       ├── transcode_engine.h / .cpp FFmpeg 原生转码引擎
-│       ├── batch.h / .cpp            JSON 清单批量处理
-│       └── media_io.h / .cpp         媒体探测 (probe) + SVG 光栅化
+│   ├── main.cpp                      CLI 入口（convert/batch/probe/codecs/pixfmts）
+│   ├── main_server.cpp               服务入口（HTTP REST API）
+│   ├── core/
+│   │   ├── config.h / .cpp           缩放算法枚举、编解码器/像素格式运行时枚举
+│   │   ├── transcode_config.h        VideoConfig / AudioConfig / TranscodeConfig
+│   │   ├── transcode_engine.h / .cpp FFmpeg 原生转码引擎
+│   │   ├── batch.h / .cpp            JSON 清单批量处理
+│   │   └── media_io.h / .cpp         媒体探测 (probe) + SVG 光栅化
+│   └── server/
+│       └── http_server.h / .cpp      HTTP 服务层（路由 + SSE + 任务管理）
+├── frontend/                         前端工程（Vue 3 + TypeScript + Vite）
+│   ├── package.json
+│   ├── vite.config.ts                API 代理 /api → 127.0.0.1:9527
+│   ├── index.html
+│   └── src/
+│       ├── main.ts                   应用入口（Element Plus + Router）
+│       ├── App.vue                   侧边栏布局 + 导航
+│       ├── router/index.ts           路由：/(批量) + /probe(探测)
+│       ├── api/index.ts              Axios API 封装
+│       ├── composables/useSSE.ts     EventSource SSE 进度流
+│       ├── components/
+│       │   ├── FileUploader.vue     拖拽上传 + 文件列表
+│       │   ├── ProgressPanel.vue    进度条 + SSE 实时更新
+│       │   └── ProbeResult.vue      媒体属性描述列表
+│       ├── views/
+│       │   ├── BatchPage.vue        批量处理主页面
+│       │   └── ProbePage.vue        媒体探测页面
+│       └── styles/
+│           └── main.css
 ├── devtools/                         开发工具（诊断程序，非发布产品）
 │   ├── CMakeLists.txt
 │   ├── diag.h / .cpp                 FFmpeg 版本/硬件编解码器/VMAF 检查
 │   └── diag_main.cpp                 诊断程序入口
 ├── libs/
 │   ├── ffmpeg/                       FFmpeg 开发包（预编译，Windows MinGW）
+│   ├── cpp-httplib/                  HTTP 单头文件库（MIT 许可）
 │   ├── nanosvg/                      SVG 解析/光栅化（zlib 许可）
 │   └── nlohmann/                     JSON 解析（MIT 许可）
 ├── cmake/
@@ -72,8 +118,9 @@ MediaGo/
 | CMake | >= 3.16 | 构建系统 |
 | C++17 编译器 | g++ 8.1+ / Clang 11+ / MSVC 2019+ | |
 | FFmpeg 开发包 | 5.0+ | libavcodec / libavformat / libavutil / libswscale / libswresample / libavfilter |
+| Node.js | >= 18 | 前端开发环境（若仅用 CLI 可选） |
 
-### 构建
+### 构建 C++ 后端
 
 ```powershell
 # Windows MinGW（预编译 FFmpeg 已内置在 libs/ffmpeg/）
@@ -95,18 +142,49 @@ cmake --build build
 
 ```
 build/
-├── MediaGo.exe         主程序
-└── devtools/
-    └── diag.exe         诊断工具（BUILD_TESTING=ON 时）
+├── MediaGo.exe             CLI 主程序
+├── MediaGoServer.exe       HTTP 服务端（GUI 后端）
+└── *.dll                   FFmpeg 运行时库（Windows）
 ```
 
+### 构建前端（GUI）
+
+```powershell
+cd frontend
+npm install          # 安装依赖（仅首次）
+npm run dev          # 启动开发服务器（localhost:5173）
+npm run build        # 生产构建（输出到 frontend/dist/）
+```
+
+### 启动完整服务
+
+```powershell
+# 终端 1：启动 C++ 后端
+cd build
+.\MediaGoServer.exe --port 9527
+
+# 终端 2：启动前端开发服务器
+cd frontend
+npm run dev
+```
+
+打开浏览器访问 `http://localhost:5173/` 即可使用 GUI。
+
+> **生产模式**：`npm run build` 后，将 `frontend/dist/` 作为 `--web-root` 参数传给服务端：
+> ```powershell
+> .\MediaGoServer.exe --port 9527 --web-root ..\frontend\dist
+> ```
+> 然后直接访问 `http://127.0.0.1:9527/` 即可（不需要前端开发服务器）。
+
 ## 使用
+
+### CLI 命令
 
 ```
 MediaGo <command> [args]
 ```
 
-### convert — 单文件转换
+#### convert — 单文件转换
 
 ```powershell
 MediaGo convert <input> <output> [options]
@@ -147,7 +225,7 @@ MediaGo convert video.mp4 video_aac.mp4 --acodec aac
 MediaGo convert 60fps.mp4 30fps.mp4 --vcodec libx264 --fps 30
 ```
 
-### batch — 批量处理
+#### batch — 批量处理
 
 ```powershell
 MediaGo batch <manifest.json>
@@ -239,7 +317,7 @@ JSON 清单结构：
 | `audio.codec` | string | 音频编码器 |
 | `audio.bitrate` | int | 音频码率 |
 
-### probe — 源文件属性探测
+#### probe — 源文件属性探测
 
 ```powershell
 MediaGo probe <file>
@@ -257,18 +335,55 @@ MediaGo probe <file>
 #   Type        : video/audio
 ```
 
-### codecs — 运行时编解码器枚举
+#### codecs — 运行时编解码器枚举
 
 ```powershell
 MediaGo codecs          # 视频编码器
 MediaGo codecs audio    # 音频编码器
 ```
 
-### pixfmts — 像素格式枚举
+#### pixfmts — 像素格式枚举
 
 ```powershell
 MediaGo pixfmts
 ```
+
+### HTTP API（GUI 后端）
+
+服务端启动后，提供以下 REST API：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/health` | 健康检查 |
+| `GET` | `/api/codecs` | 编解码器列表（?type=audio 筛选） |
+| `GET` | `/api/pixfmts` | 像素格式列表 |
+| `GET` | `/api/probe?path=xxx` | 探测媒体属性 |
+| `POST` | `/api/upload` | 多文件上传（multipart/form-data） |
+| `POST` | `/api/batch` | 提交批量转码（JSON 清单） |
+| `GET` | `/api/progress/:task_id` | SSE 实时进度推送 |
+
+**curl 示例：**
+
+```powershell
+# 健康检查
+curl http://127.0.0.1:9527/api/health
+
+# 探测文件属性
+curl "http://127.0.0.1:9527/api/probe?path=C:/Videos/sample.mp4"
+
+# 提交批量转码
+curl -X POST http://127.0.0.1:9527/api/batch -H "Content-Type: application/json" -d '{"output":{"dir":"./output"},"jobs":[{"input":"sample.mp4","video":{"width":1920,"height":1080}}]}'
+
+# SSE 进度监控
+curl -N http://127.0.0.1:9527/api/progress/abc123
+```
+
+### GUI 页面
+
+| 页面 | 路径 | 功能 |
+|------|------|------|
+| 批量处理 | `/` | 拖拽上传 → 配置编码参数 → 异步转码 → SSE 实时进度 |
+| 媒体探测 | `/probe` | 输入路径 → 查看编解码器、分辨率、颜色空间等属性 |
 
 ## 核心 API
 
@@ -316,6 +431,25 @@ struct TranscodeResult {
 };
 
 TranscodeResult transcode_run(const TranscodeConfig& cfg);
+```
+
+### MediaGoServer（`src/server/http_server.h`）
+
+```cpp
+class MediaGoServer {
+public:
+    MediaGoServer();
+    ~MediaGoServer();
+
+    bool start(int port = 9527, const char* web_root = nullptr);
+    void stop();
+    bool is_running() const;
+};
+
+// 用法
+//   MediaGoServer svr;
+//   svr.start(9527, "./frontend/dist");  // 生产模式
+//   svr.start(9527);                     // 仅 API 模式
 ```
 
 ### BatchProcessor（`src/core/batch.h`）
@@ -496,11 +630,24 @@ MP3 / WAV / FLAC / AAC / OGG / Opus / WMA
 
 创建 IMPORTED 目标：`FFmpeg::avcodec` / `FFmpeg::avformat` / `FFmpeg::avutil` / `FFmpeg::swscale` / `FFmpeg::swresample` / `FFmpeg::avfilter`。
 
+## 技术栈
+
+| 层 | 技术 | 说明 |
+|----|------|------|
+| 转码引擎 | C++17 + FFmpeg | 五阶段原生管线 |
+| HTTP 服务 | cpp-httplib | 单头文件零依赖 |
+| 前端框架 | Vue 3 + TypeScript | 组件化 GUI |
+| UI 组件库 | Element Plus | 企业级设计规范 |
+| 构建工具 | Vite | 极速开发体验 |
+| 桌面打包 | Tauri 2.x（规划中） | 轻量跨平台桌面 App |
+
 ## 许可
 
 | 组件 | 许可 |
 |------|------|
 | MediaGo 自身 | GPL |
 | FFmpeg | LGPL / GPL（取决于编译选项） |
+| cpp-httplib | MIT |
 | nanosvg | zlib |
 | nlohmann/json | MIT |
+| Vue 3 / Element Plus | MIT |

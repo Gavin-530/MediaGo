@@ -1,0 +1,45 @@
+import axios from 'axios'
+
+const api = axios.create({
+  baseURL: '/api',
+  timeout: 30000,
+})
+
+// ---- 健康检查 ----
+export function healthCheck() {
+  return api.get('/health')
+}
+
+// ---- 文件上传 ----
+export function uploadFiles(formData: FormData) {
+  return api.post('/upload', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+
+// ---- 批量转码 ----
+export function submitBatch(manifest: object) {
+  return api.post('/batch', manifest)
+}
+
+// ---- SSE 进度 ----
+export function getProgressUrl(taskId: string): string {
+  return `/api/progress/${taskId}`
+}
+
+// ---- 媒体探测 ----
+export function probeFile(filePath: string) {
+  return api.get('/probe', { params: { path: filePath } })
+}
+
+// ---- 编解码器列表 ----
+export function getCodecs(type?: 'video' | 'audio') {
+  return api.get('/codecs', { params: type ? { type } : {} })
+}
+
+// ---- 像素格式列表 ----
+export function getPixFmts() {
+  return api.get('/pixfmts')
+}
+
+export default api
