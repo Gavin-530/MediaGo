@@ -1,0 +1,41 @@
+# ============================================
+# MediaGo - Code Style Configuration
+# 基于 LLVM 风格，缩进调整为 4 空格
+# ============================================
+
+Language: Cpp
+BasedOnStyle: LLVM
+
+# 缩进
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+
+# 大括号
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# 列宽
+ColumnLimit: 120
+
+# 空格
+PointerAlignment: Left
+SpaceBeforeParens: ControlStatements
+SpacesInAngles: false
+
+# 换行
+AlignAfterOpenBracket: Align
+BinPackArguments: true
+BinPackParameters: true
+
+# 排序
+SortIncludes: true
+IncludeBlocks: Preserve
+
+# 其他
+Cpp11BracedListStyle: true
+DerivePointerAlignment: false
+FixNamespaceComments: true

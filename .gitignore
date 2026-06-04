@@ -41,6 +41,7 @@
 # 构建目录
 # ============================================
 build/
+cmake-build/
 cmake-build-*/
 out/
 dist/
@@ -87,9 +88,6 @@ cmake_install.cmake
 CTestTestfile.cmake
 Testing/
 CMakeUserPresets.json
-
-# Make (启用则手写的 Makefile 也会被忽略)
-# Makefile
 
 # ============================================
 # 包管理器（库文件按需获取，不提交到仓库）
@@ -151,9 +149,20 @@ InnoSetup/
 Output/
 
 # ============================================
-# 测试（不提交）
+# 本地测试沙盒 — 完全隔离，随时可删
+#
+# 原则：
+#   - 所有测试用的输入媒体文件和输出产物都在 sandbox/ 内
+#   - 与项目源码完全隔离，删除 sandbox/ 不影响项目任何部分
+#   - sandbox/input/  放测试源文件
+#   - sandbox/output/ 放 MediaGo 处理结果
 # ============================================
-tests/
+sandbox/
+
+# ============================================
+# 开发工具 — 源码入库，产物不入库
+# ============================================
+devtools/tmp/
 output/
 coverage/
 coverage_html/

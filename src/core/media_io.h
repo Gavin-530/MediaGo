@@ -1,14 +1,6 @@
 // MediaGo - 统一媒体 I/O 接口
-// 光栅图通过 FFmpeg codec 处理（PNG/JPEG/BMP/WebP/AVIF/HEIF 等 30+ 格式）
-// 矢量图通过 nanosvg 处理（SVG 解析 + 光栅化）
+// 探测源文件属性 + SVG 矢量图光栅化
 // 所有内存统一走 av_malloc/av_free，杜绝分配器混用
-//
-// 重构要点（v2）：
-//   - 解码目标格式从硬编码 RGBA8 改为由 Config 配置
-//   - 编码从 media_save_png/jpg 两个函数合并为统一的 media_encode
-//   - 新增 media_probe：获取源文件属性，供配置回填和决策引擎使用
-//   - 新增 media_stream_copy：bit-exact 流拷贝（同格式无损直通）
-//   - SVG 光栅化接受 ScaleConfig 而非硬编码 w/h
 
 #pragma once
 
@@ -63,46 +55,6 @@ struct SourceInfo {
 // 不解码任何像素数据，仅读取头部和流信息
 // 失败返回 false
 bool media_probe(const char* path, SourceInfo* info);
-
-// ============================================================
-// 解码
-// ============================================================
-
-// 解码媒体文件到指定像素格式的帧
-//   path     - 输入文件路径
-//   dst_fmt  - 目标像素格式；AV_PIX_FMT_NONE 表示与源格式一致
-//   frame_out- 输出的 AVFrame（由调用方 av_frame_free 释放）
-// 失败返回 false
-//
-// 说明：dst_fmt=AV_PIX_FMT_NONE 时，直接输出解码器原始格式，
-// 不经过 sws_scale 转换，保证位深和色彩空间完全保留。
-bool media_decode(const char* path, AVPixelFormat dst_fmt,
-                  AVFrame** frame_out);
-
-// ============================================================
-// 编码
-// ============================================================
-
-// 统一编码接口：将 AVFrame 编码为指定格式文件
-//   path      - 输出文件路径（扩展名决定容器格式）
-//   frame     - 待编码的帧（像素格式由帧自身决定）
-//   cfg       - 图片编码配置（编码器、质量等；未指定字段从 frame 属性回填）
-//
-// 说明：
-//   - cfg.encode.name 为 nullptr 时，根据输出扩展名自动选择编码器
-//   - cfg.encode.quality 为 -1 时，按编码器默认质量
-//   - 编码器选择的像素格式优先取 cfg.encode.pixel_fmt，其次取 frame 自身格式
-bool media_encode(const char* path, const AVFrame* frame,
-                  const ImageConfig& cfg);
-
-// ============================================================
-// 流拷贝（bit-exact，同格式无损直通）
-// ============================================================
-
-// 容器/编码相同的格式直接复制 bitstream，零质量损失
-// 适用于：PNG→PNG, JPEG→JPEG（同参数）, 或任何仅需重封装不需重编码的场景
-// 内部通过 avformat demux → remux 实现
-bool media_stream_copy(const char* input, const char* output);
 
 // ============================================================
 // 矢量图 (nanosvg)
