@@ -390,6 +390,9 @@ bool TranscodeEngine::setup_streams(const TranscodeConfig& cfg) {
                 if (cfg.video.tune) {
                     av_opt_set(enc_ctx->priv_data, "tune", cfg.video.tune, 0);
                 }
+                if (cfg.video.profile) {
+                    av_opt_set(enc_ctx->priv_data, "profile", cfg.video.profile, 0);
+                }
 
                 // GOP
                 if (cfg.video.gop_size > 0) {

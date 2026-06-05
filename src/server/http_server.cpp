@@ -35,7 +35,10 @@ using json = nlohmann::json;
 
 struct MediaGoServer::Impl {
     httplib::Server svr;
-    std::string upload_dir = "./uploads";
+    std::string data_dir = "./data";
+    std::string upload_dir;     // data/uploads
+    std::string manifest_dir;   // data/manifests
+    std::string history_path;   // data/history.json
 
     // ---- 任务管理 ----
     struct TaskState {
@@ -185,7 +188,7 @@ void MediaGoServer::register_routes() {
         // 将 JSON 写入临时清单文件
         std::string task_id = Impl::make_task_id();
         std::string manifest_path =
-            impl_->upload_dir + "/_manifest_" + task_id + ".json";
+            impl_->manifest_dir + "/_manifest_" + task_id + ".json";
         {
             std::ofstream f(manifest_path);
             f << req_body.dump(2);
@@ -208,7 +211,7 @@ void MediaGoServer::register_routes() {
             bool ok = bp.process(
                 manifest_path.c_str(),
                 [state](unsigned index, unsigned total, JobStatus status,
-                        const std::string& input) {
+                        const std::string& input, const std::string& output) {
                     std::lock_guard<std::mutex> lock(state->mtx);
                     state->progress.current_job = index;
                     state->progress.total_jobs = total;
@@ -221,12 +224,12 @@ void MediaGoServer::register_routes() {
                     case JobStatus::OK:
                         state->progress.job_status = "ok";
                         state->progress.ok_count++;
-                        state->progress.result_files.push_back(input);
+                        state->progress.result_files.push_back(output);
                         break;
                     case JobStatus::Fail:
                         state->progress.job_status = "fail";
                         state->progress.fail_count++;
-                        state->progress.result_errors.push_back(input);
+                        state->progress.result_errors.push_back(output.empty() ? input : output);
                         break;
                     }
                     state->update_seq++;
@@ -237,8 +240,11 @@ void MediaGoServer::register_routes() {
                 std::lock_guard<std::mutex> lock(state->mtx);
                 state->progress.status =
                     ok ? TaskStatus::Completed : TaskStatus::Failed;
-                if (!ok)
-                    state->progress.error = "batch processing had failures";
+                if (!ok) {
+                    state->progress.error = bp.last_error().empty()
+                        ? "batch processing had failures"
+                        : bp.last_error();
+                }
                 state->done = true;
                 state->update_seq++;
                 state->cv.notify_all();
@@ -246,6 +252,39 @@ void MediaGoServer::register_routes() {
 
             // 清理清单文件
             std::remove(manifest_path.c_str());
+
+            // 保存处理历史
+            {
+                json entry;
+                entry["id"]  = task_id;
+                entry["time"] = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                entry["status"] = ok ? "completed" : "failed";
+                entry["ok_count"] = state->progress.ok_count;
+                entry["fail_count"] = state->progress.fail_count;
+                entry["result_files"] = state->progress.result_files;
+                entry["result_errors"] = state->progress.result_errors;
+                entry["error"] = state->progress.error;
+
+                // 读取已有历史
+                json history = json::array();
+                {
+                    std::ifstream hf(impl_->history_path);
+                    if (hf) {
+                        try { history = json::parse(hf); }
+                        catch (...) { history = json::array(); }
+                    }
+                }
+                history.push_back(entry);
+
+                // 限制最多保留 100 条
+                while (history.size() > 100) {
+                    history.erase(history.begin());
+                }
+
+                std::ofstream hf(impl_->history_path);
+                hf << history.dump(2);
+            }
         }).detach();
 
         // 返回任务 ID
@@ -310,19 +349,31 @@ void MediaGoServer::register_routes() {
 
             ctx->last_seq = ctx->state->update_seq;
 
-            if (ctx->state->done) {
-                // 发送最终状态
+            // 构造进度 JSON（中间和最终共用）
+            auto build_json = [&ctx]() {
                 json j;
-                j["status"] = ctx->state->progress.status == TaskStatus::Completed
-                                  ? "completed"
-                                  : "failed";
+                j["status"] = ctx->state->done
+                    ? (ctx->state->progress.status == TaskStatus::Completed
+                           ? "completed"
+                           : "failed")
+                    : "running";
                 j["current_job"] = ctx->state->progress.current_job;
                 j["total_jobs"] = ctx->state->progress.total_jobs;
                 j["current_file"] = ctx->state->progress.current_file;
                 j["job_status"] = ctx->state->progress.job_status;
                 j["ok_count"] = ctx->state->progress.ok_count;
                 j["fail_count"] = ctx->state->progress.fail_count;
-                j["error"] = ctx->state->progress.error;
+                if (ctx->state->done) {
+                    j["error"] = ctx->state->progress.error;
+                    j["result_files"] = ctx->state->progress.result_files;
+                    j["result_errors"] = ctx->state->progress.result_errors;
+                }
+                return j;
+            };
+
+            if (ctx->state->done) {
+                // 发送最终状态
+                json j = build_json();
                 std::string data = "data: " + j.dump() + "\n\n";
                 sink.write(data.data(), data.size());
                 sink.write("event: done\ndata: {}\n\n", 22);
@@ -332,14 +383,7 @@ void MediaGoServer::register_routes() {
             }
 
             // 推送当前进度
-            json j;
-            j["status"] = "running";
-            j["current_job"] = ctx->state->progress.current_job;
-            j["total_jobs"] = ctx->state->progress.total_jobs;
-            j["current_file"] = ctx->state->progress.current_file;
-            j["job_status"] = ctx->state->progress.job_status;
-            j["ok_count"] = ctx->state->progress.ok_count;
-            j["fail_count"] = ctx->state->progress.fail_count;
+            json j = build_json();
 
             std::string data = "data: " + j.dump() + "\n\n";
             sink.write(data.data(), data.size());
@@ -486,6 +530,340 @@ void MediaGoServer::register_routes() {
         }
         res.set_content(j.dump(), "application/json");
     });
+
+    // ---- 处理历史 ----
+    svr.Get("/api/history", [this](const httplib::Request&, httplib::Response& res) {
+        json history = json::array();
+        {
+            std::ifstream hf(impl_->history_path);
+            if (hf) {
+                try { history = json::parse(hf); } catch (...) {}
+            }
+        }
+        res.set_content(history.dump(), "application/json");
+    });
+
+    // ---- 打开输出目录 ----
+    svr.Post("/api/open-folder", [this](const httplib::Request& req, httplib::Response& res) {
+        json req_body;
+        try { req_body = json::parse(req.body); }
+        catch (...) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"invalid json\"}", "application/json");
+            return;
+        }
+
+        std::string dir = req_body.value("dir", "");
+        if (dir.empty()) {
+            res.status = 400;
+            res.set_content("{\"ok\":false,\"error\":\"missing dir\"}", "application/json");
+            return;
+        }
+
+#ifdef _WIN32
+        // 安全检查：只允许 data/ 下的目录
+        if (dir.rfind("data/", 0) != 0 && dir.rfind("data\\", 0) != 0 &&
+            dir.rfind("./data/", 0) != 0 && dir.rfind(".\\data\\", 0) != 0) {
+            res.status = 403;
+            res.set_content("{\"ok\":false,\"error\":\"forbidden path\"}", "application/json");
+            return;
+        }
+
+        // 确保目录存在
+        CreateDirectoryA(dir.c_str(), nullptr);
+
+        // 用 Explorer 打开
+        std::string cmd = "explorer \"" + dir + "\"";
+        system(cmd.c_str());
+        res.set_content("{\"ok\":true}", "application/json");
+#else
+        std::string cmd = "open \"" + dir + "\"";
+        system(cmd.c_str());
+        res.set_content("{\"ok\":true}", "application/json");
+#endif
+    });
+
+    // ---- 编码器参数能力查询 (视频) ----
+    svr.Post("/api/encoder-params", [](const httplib::Request& req, httplib::Response& res) {
+        json req_body;
+        try { req_body = json::parse(req.body); }
+        catch (...) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid json\"}", "application/json");
+            return;
+        }
+
+        std::string codec = req_body.value("codec", "");
+        if (codec.empty()) {
+            res.status = 400;
+            res.set_content("{\"error\":\"missing codec\"}", "application/json");
+            return;
+        }
+
+        json result;
+        result["codec"] = codec;
+
+        struct EncoderProfile {
+            std::vector<const char*> rate_controls; // crf / cqp / abr / cbr / vbr
+            std::vector<const char*> presets;
+            std::vector<const char*> tunes;
+            std::vector<const char*> profiles;       // baseline / main / high ...
+            std::vector<const char*> pixel_fmts;
+        };
+
+        std::map<std::string, EncoderProfile> profiles;
+
+        // ---- H.264 系列 ----
+        profiles["libx264"] = {
+            {"crf","abr","cbr","vbr"},
+            {"ultrafast","superfast","veryfast","faster","fast","medium",
+             "slow","slower","veryslow","placebo"},
+            {"film","animation","grain","stillimage","fastdecode","zerolatency"},
+            {"baseline","main","high","high10","high422","high444"},
+            {"yuv420p","yuv422p","yuv444p","yuv420p10le","yuv422p10le","yuv444p10le"}
+        };
+        profiles["libx264rgb"] = {
+            {"crf","abr","cbr","vbr"},
+            {"ultrafast","superfast","veryfast","faster","fast","medium",
+             "slow","slower","veryslow","placebo"},
+            {},
+            {"baseline","main","high","high10","high422","high444"},
+            {"rgb24","bgr0"}
+        };
+        profiles["h264_amf"] = {
+            {"cqp","cbr","vbr"},
+            {"speed","balanced","quality"},
+            {},
+            {"main","high"},
+            {"nv12","yuv420p"}
+        };
+        profiles["h264_nvenc"] = {
+            {"cqp","cbr","vbr"},
+            {"p1","p2","p3","p4","p5","p6","p7"},
+            {"hq","ll","ull","lossless"},
+            {"baseline","main","high","high444p"},
+            {"yuv420p","yuv444p","p010le"}
+        };
+        profiles["h264_qsv"] = {
+            {"cqp","cbr","vbr"},
+            {"veryfast","faster","fast","medium","slow","veryslow"},
+            {},
+            {"baseline","main","high"},
+            {"nv12","yuv420p"}
+        };
+
+        // ---- H.265 / HEVC 系列 ----
+        profiles["libx265"] = {
+            {"crf","abr","cbr","vbr"},
+            {"ultrafast","superfast","veryfast","faster","fast","medium",
+             "slow","slower","veryslow","placebo"},
+            {"psnr","ssim","grain","fastdecode","zerolatency"},
+            {"main","main10","main12","main422-10","main422-12","main444-8","main444-10","main444-12"},
+            {"yuv420p","yuv422p","yuv444p","yuv420p10le","yuv422p10le","yuv444p10le","yuv420p12le","yuv422p12le","yuv444p12le"}
+        };
+        profiles["hevc_amf"] = {
+            {"cqp","cbr","vbr"},
+            {"speed","balanced","quality"},
+            {},
+            {"main"},
+            {"nv12","yuv420p"}
+        };
+        profiles["hevc_nvenc"] = {
+            {"cqp","cbr","vbr"},
+            {"p1","p2","p3","p4","p5","p6","p7"},
+            {"hq","ll","ull","lossless"},
+            {"main","main10","rext"},
+            {"yuv420p","yuv444p","p010le","p016le"}
+        };
+        profiles["hevc_qsv"] = {
+            {"cqp","cbr","vbr"},
+            {"veryfast","faster","fast","medium","slow","veryslow"},
+            {},
+            {"main","main10","mainsp"},
+            {"nv12","yuv420p","p010le"}
+        };
+
+        // ---- VP9 ----
+        profiles["libvpx-vp9"] = {
+            {"crf","abr","cbr","vbr"},
+            {"0","1","2","3","4","5","6"},
+            {},
+            {"0","1","2","3"},
+            {"yuv420p","yuv422p","yuv444p","yuv420p10le"}
+        };
+
+        // ---- AV1 ----
+        profiles["libaom-av1"] = {
+            {"crf","abr","cbr","vbr"},
+            {"0","1","2","3","4","5","6","7","8","9"},
+            {},
+            {"0","1","2"},
+            {"yuv420p","yuv422p","yuv444p","yuv420p10le","yuv420p12le"}
+        };
+        profiles["libsvtav1"] = {
+            {"crf","abr","cbr","vbr"},
+            {"0","1","2","3","4","5","6","7","8","9","10","11","12","13"},
+            {},
+            {"main","high","professional"},
+            {"yuv420p","yuv420p10le"}
+        };
+
+        // ---- MPEG ----
+        profiles["mpeg4"] = {
+            {"abr","cbr"},
+            {},
+            {},
+            {"simple","advanced_simple"},
+            {"yuv420p"}
+        };
+        profiles["libxvid"] = {
+            {"abr","cbr"},
+            {},
+            {},
+            {},
+            {"yuv420p"}
+        };
+
+        // ---- MJPEG ----
+        profiles["mjpeg"] = {
+            {"abr"},
+            {},
+            {},
+            {},
+            {"yuvj420p","yuvj422p","yuvj444p"}
+        };
+
+        auto it = profiles.find(codec);
+        if (it != profiles.end()) {
+            auto& p = it->second;
+
+            json rc = json::array();
+            for (auto& s : p.rate_controls) rc.push_back(s);
+            result["rate_controls"] = rc;
+
+            json pa = json::array();
+            for (auto& s : p.presets) pa.push_back(s);
+            result["presets"] = pa;
+
+            json ta = json::array();
+            for (auto& s : p.tunes) ta.push_back(s);
+            result["tunes"] = ta;
+
+            json pf = json::array();
+            for (auto& s : p.profiles) pf.push_back(s);
+            result["profiles"] = pf;
+
+            json px = json::array();
+            for (auto& s : p.pixel_fmts) px.push_back(s);
+            result["pixel_fmts"] = px;
+        } else {
+            result["rate_controls"] = json::array({"abr"});
+            result["presets"] = json::array();
+            result["tunes"] = json::array();
+            result["profiles"] = json::array();
+            result["pixel_fmts"] = json::array();
+        }
+
+        res.set_content(result.dump(), "application/json");
+    });
+
+    // ---- 音频编码器参数能力查询 ----
+    svr.Post("/api/audio-encoder-params", [](const httplib::Request& req, httplib::Response& res) {
+        json req_body;
+        try { req_body = json::parse(req.body); }
+        catch (...) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid json\"}", "application/json");
+            return;
+        }
+
+        std::string codec = req_body.value("codec", "");
+        if (codec.empty()) {
+            res.status = 400;
+            res.set_content("{\"error\":\"missing codec\"}", "application/json");
+            return;
+        }
+
+        json result;
+        result["codec"] = codec;
+
+        struct AudioProfile {
+            std::vector<int> sample_rates;
+            std::vector<const char*> channel_layouts;
+            bool has_quality;
+            bool has_bitrate;
+        };
+
+        std::map<std::string, AudioProfile> aprofiles;
+        aprofiles["aac"] = {
+            {8000,11025,12000,16000,22050,24000,32000,44100,48000,88200,96000},
+            {"mono","stereo","5.1","7.1"},
+            true, true
+        };
+        aprofiles["libfdk_aac"] = {
+            {8000,11025,12000,16000,22050,24000,32000,44100,48000,88200,96000},
+            {"mono","stereo","5.1","7.1"},
+            true, true
+        };
+        aprofiles["libmp3lame"] = {
+            {8000,11025,12000,16000,22050,24000,32000,44100,48000},
+            {"mono","stereo","joint_stereo"},
+            false, true
+        };
+        aprofiles["flac"] = {
+            {8000,16000,22050,24000,32000,44100,48000,88200,96000},
+            {"mono","stereo","5.1","7.1"},
+            false, false
+        };
+        aprofiles["libopus"] = {
+            {8000,12000,16000,24000,48000},
+            {"mono","stereo","5.1","7.1"},
+            false, true
+        };
+        aprofiles["ac3"] = {
+            {32000,44100,48000},
+            {"mono","stereo","5.1"},
+            false, true
+        };
+        aprofiles["libvorbis"] = {
+            {8000,11025,16000,22050,44100,48000},
+            {"mono","stereo","5.1"},
+            true, true
+        };
+        aprofiles["pcm_s16le"] = {
+            {8000,16000,22050,24000,32000,44100,48000,88200,96000},
+            {"mono","stereo","5.1","7.1"},
+            false, false
+        };
+        aprofiles["pcm_s24le"] = {
+            {8000,16000,22050,24000,32000,44100,48000,88200,96000},
+            {"mono","stereo","5.1","7.1"},
+            false, false
+        };
+
+        auto it = aprofiles.find(codec);
+        if (it != aprofiles.end()) {
+            auto& p = it->second;
+
+            json srs = json::array();
+            for (auto& sr : p.sample_rates) srs.push_back(sr);
+            result["sample_rates"] = srs;
+
+            json cls = json::array();
+            for (auto& cl : p.channel_layouts) cls.push_back(cl);
+            result["channel_layouts"] = cls;
+
+            result["has_quality"] = p.has_quality;
+            result["has_bitrate"] = p.has_bitrate;
+        } else {
+            result["sample_rates"] = json::array({44100, 48000});
+            result["channel_layouts"] = json::array({"stereo"});
+            result["has_quality"] = false;
+            result["has_bitrate"] = true;
+        }
+
+        res.set_content(result.dump(), "application/json");
+    });
 }
 
 // ============================================================
@@ -498,15 +876,24 @@ bool MediaGoServer::start(int port, const char* web_root) {
     port_ = port;
     if (web_root) web_root_ = web_root;
 
+    // 初始化数据子目录
+    impl_->upload_dir   = impl_->data_dir + "/uploads";
+    impl_->manifest_dir = impl_->data_dir + "/manifests";
+    impl_->history_path = impl_->data_dir + "/history.json";
+
     register_routes();
 
     running_ = true;
 
-    // 确保上传目录存在
+    // 确保数据目录存在
 #ifdef _WIN32
+    CreateDirectoryA(impl_->data_dir.c_str(), nullptr);
     CreateDirectoryA(impl_->upload_dir.c_str(), nullptr);
+    CreateDirectoryA(impl_->manifest_dir.c_str(), nullptr);
 #else
+    system(("mkdir -p \"" + impl_->data_dir + "\"").c_str());
     system(("mkdir -p \"" + impl_->upload_dir + "\"").c_str());
+    system(("mkdir -p \"" + impl_->manifest_dir + "\"").c_str());
 #endif
 
     server_thread_ = std::thread([this]() {

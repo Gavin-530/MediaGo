@@ -42,4 +42,24 @@ export function getPixFmts() {
   return api.get('/pixfmts')
 }
 
+// ---- 处理历史 ----
+export function getHistory() {
+  return api.get('/history')
+}
+
+// ---- 打开目录 ----
+export function openFolder(dir: string) {
+  return api.post('/open-folder', { dir })
+}
+
+// ---- 编码器参数 ----
+export function getEncoderParams(codec: string) {
+  return api.post('/encoder-params', { codec })
+}
+
+// ---- 音频编码器参数 ----
+export function getAudioEncoderParams(codec: string) {
+  return api.post('/audio-encoder-params', { codec })
+}
+
 export default api

@@ -32,6 +32,9 @@ struct VideoConfig {
     // 编码器调优："film" "animation" "grain" 等
     const char* tune = nullptr;
 
+    // 编码器 profile："baseline" "main" "high" 等
+    const char* profile = nullptr;
+
     // 缩放
     int width = 0;                   // 目标宽度，0=保持
     int height = 0;                  // 目标高度，0=保持

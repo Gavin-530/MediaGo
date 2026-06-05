@@ -2,17 +2,58 @@
   <div class="batch-page">
     <h1 class="page-title">批量处理</h1>
 
+    <!-- 处理历史面板 -->
+    <el-collapse v-if="history.length > 0" class="history-panel" v-model="historyOpen">
+      <el-collapse-item name="1">
+        <template #title>
+          <span>处理历史 ({{ history.length }})</span>
+        </template>
+        <div class="history-list">
+          <div
+            v-for="(item, i) in history"
+            :key="item.id"
+            class="history-entry"
+            :class="item.status === 'completed' ? 'hist-success' : 'hist-fail'"
+          >
+            <div class="hist-meta">
+              <el-tag :type="item.status === 'completed' ? 'success' : 'danger'" size="small">
+                {{ item.status === 'completed' ? '成功' : '失败' }}
+              </el-tag>
+              <span class="hist-time">{{ formatTime(item.time) }}</span>
+              <span class="hist-count">
+                {{ item.ok_count }}/{{ (item.ok_count || 0) + (item.fail_count || 0) }} 完成
+              </span>
+              <el-button
+                v-if="item.result_files && item.result_files.length > 0"
+                link
+                size="small"
+                type="primary"
+                @click="openHistoryFolder(item)"
+              >
+                打开输出目录
+              </el-button>
+            </div>
+            <div v-if="item.result_files && item.result_files.length > 0" class="hist-files">
+              <span v-for="(f, j) in item.result_files" :key="'hf-'+j" class="hist-file">
+                {{ f }}
+              </span>
+            </div>
+          </div>
+        </div>
+      </el-collapse-item>
+    </el-collapse>
+
     <!-- 步骤 1: 文件上传 -->
     <FileUploader v-model="selectedFiles" />
 
     <!-- 步骤 2: 输出与转码配置 -->
     <el-card class="config-card" shadow="never">
       <template #header><span>输出配置</span></template>
-      <el-form :model="config" label-width="100px" size="default">
+      <el-form :model="config" label-width="110px" size="default">
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="输出目录">
-              <el-input v-model="config.outputDir" placeholder="./output" />
+              <el-input v-model="config.outputDir" placeholder="./data/output" />
             </el-form-item>
           </el-col>
           <el-col :span="12">
@@ -25,11 +66,12 @@
           </el-col>
         </el-row>
 
+        <!-- ============ 视频编码 ============ -->
         <el-divider content-position="left">视频编码</el-divider>
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="编码器">
-              <el-select v-model="config.videoCodec" clearable filterable placeholder="默认 = 流拷贝">
+              <el-select v-model="config.videoCodec" clearable filterable placeholder="默认 = 流拷贝" @change="onVideoCodecChange">
                 <el-option
                   v-for="c in videoCodecs"
                   :key="c.name"
@@ -39,54 +81,172 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="6">
-            <el-form-item label="CRF 质量">
-              <el-input-number v-model="config.videoCrf" :min="0" :max="51" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="6">
-            <el-form-item label="码率 (bps)">
-              <el-input v-model="config.videoBitrate" placeholder="如 2000000" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16">
+          <!-- 码率控制模式 -->
           <el-col :span="12">
-            <el-form-item label="编码预设">
-              <el-select v-model="config.videoPreset" clearable placeholder="默认">
-                <el-option label="ultrafast" value="ultrafast" />
-                <el-option label="fast" value="fast" />
-                <el-option label="medium" value="medium" />
-                <el-option label="slow" value="slow" />
+            <el-form-item v-if="encoderCaps.rate_controls.length > 0" label="码率控制">
+              <el-select v-model="config.videoRateControl" @change="onRateControlChange">
+                <el-option
+                  v-for="rc in encoderCaps.rate_controls"
+                  :key="rc"
+                  :label="rateControlLabel(rc)"
+                  :value="rc"
+                />
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+        </el-row>
+
+        <!-- 码率控制参数（动态） -->
+        <el-row v-if="config.videoCodec && encoderCaps.rate_controls.length > 0" :gutter="16">
+          <!-- CRF / CQP -->
+          <el-col v-if="config.videoRateControl === 'crf' || config.videoRateControl === 'cqp'" :span="8">
+            <el-form-item :label="config.videoRateControl === 'cqp' ? 'CQP 值' : 'CRF 质量'">
+              <el-input-number v-model="config.videoCrf" :min="0" :max="51" />
+            </el-form-item>
+          </el-col>
+          <!-- 码率（ABR / CBR / VBR 都需要） -->
+          <el-col
+            v-if="config.videoRateControl === 'abr' || config.videoRateControl === 'cbr' || config.videoRateControl === 'vbr'"
+            :span="config.videoRateControl === 'vbr' ? 8 : 12"
+          >
+            <el-form-item label="目标码率 (bps)">
+              <el-input v-model="config.videoBitrate" placeholder="如 2000000" />
+            </el-form-item>
+          </el-col>
+          <!-- VBR 专属：最大码率 + 缓冲 -->
+          <template v-if="config.videoRateControl === 'vbr'">
+            <el-col :span="8">
+              <el-form-item label="最大码率 (bps)">
+                <el-input v-model="config.videoMaxrate" placeholder="如 4000000" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="缓冲大小 (bits)">
+                <el-input v-model="config.videoBufsize" placeholder="如 8000000" />
+              </el-form-item>
+            </el-col>
+          </template>
+          <!-- CBR 提示 -->
+          <el-col v-if="config.videoRateControl === 'cbr'" :span="12">
+            <span class="form-hint">CBR 模式会将最大码率固定为目标码率</span>
+          </el-col>
+        </el-row>
+
+        <!-- 预设 / Tune / Profile -->
+        <el-row :gutter="16">
+          <el-col v-if="encoderCaps.presets.length > 0" :span="8">
+            <el-form-item label="编码预设">
+              <el-select v-model="config.videoPreset" clearable placeholder="默认">
+                <el-option v-for="p in encoderCaps.presets" :key="p" :label="p" :value="p" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col v-if="encoderCaps.tunes.length > 0" :span="7">
+            <el-form-item label="Tune">
+              <el-select v-model="config.videoTune" clearable placeholder="默认">
+                <el-option v-for="t in encoderCaps.tunes" :key="t" :label="t" :value="t" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col v-if="encoderCaps.profiles.length > 0" :span="9">
+            <el-form-item label="Profile">
+              <el-select v-model="config.videoProfile" clearable placeholder="默认">
+                <el-option v-for="pf in encoderCaps.profiles" :key="pf" :label="pf" :value="pf" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <!-- 缩放 -->
+        <el-row :gutter="16">
+          <el-col :span="8">
             <el-form-item label="缩放">
               <el-input v-model="config.videoScale" placeholder="如 1920x1080" />
             </el-form-item>
           </el-col>
         </el-row>
 
+        <!-- 高级视频选项 -->
+        <el-collapse v-if="config.videoCodec" class="advanced-collapse">
+          <el-collapse-item title="高级视频选项" name="video_adv">
+            <el-row :gutter="16">
+              <el-col :span="8">
+                <el-form-item label="帧率 (fps)">
+                  <el-input v-model="config.videoFps" placeholder="保持源帧率" />
+                </el-form-item>
+              </el-col>
+              <el-col v-if="encoderCaps.pixel_fmts.length > 0" :span="8">
+                <el-form-item label="像素格式">
+                  <el-select v-model="config.videoPixelFmt" clearable placeholder="默认">
+                    <el-option v-for="px in encoderCaps.pixel_fmts" :key="px" :label="px" :value="px" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="GOP 大小">
+                  <el-input-number v-model="config.videoGop" :min="0" :step="10" placeholder="编码器默认" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="16">
+              <el-col :span="8">
+                <el-form-item label="线程数">
+                  <el-input-number v-model="config.videoThreads" :min="0" placeholder="自动" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+          </el-collapse-item>
+        </el-collapse>
+
+        <!-- ============ 音频编码 ============ -->
         <el-divider content-position="left">音频编码</el-divider>
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="编码器">
-              <el-select v-model="config.audioCodec" clearable filterable placeholder="默认 = 流拷贝">
-                <el-option label="AAC" value="aac" />
-                <el-option label="MP3" value="libmp3lame" />
-                <el-option label="FLAC" value="flac" />
-                <el-option label="Opus" value="libopus" />
+              <el-select v-model="config.audioCodec" clearable filterable placeholder="默认 = 流拷贝" @change="onAudioCodecChange">
+                <el-option
+                  v-for="c in audioCodecs"
+                  :key="c.name"
+                  :label="`${c.name} (${c.long_name})`"
+                  :value="c.name"
+                />
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col v-if="audioCaps.has_bitrate" :span="12">
             <el-form-item label="码率 (bps)">
               <el-input v-model="config.audioBitrate" placeholder="如 128000" />
             </el-form-item>
           </el-col>
         </el-row>
+        <el-row v-if="config.audioCodec" :gutter="16">
+          <el-col v-if="audioCaps.sample_rates.length > 0" :span="8">
+            <el-form-item label="采样率 (Hz)">
+              <el-select v-model="config.audioSampleRate" clearable placeholder="保持">
+                <el-option
+                  v-for="sr in audioCaps.sample_rates"
+                  :key="sr"
+                  :label="sr"
+                  :value="sr"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col v-if="audioCaps.channel_layouts.length > 0" :span="8">
+            <el-form-item label="声道布局">
+              <el-select v-model="config.audioChannelLayout" clearable placeholder="保持">
+                <el-option
+                  v-for="cl in audioCaps.channel_layouts"
+                  :key="cl"
+                  :label="cl"
+                  :value="cl"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
 
+        <!-- ============ 容器 ============ -->
         <el-divider />
         <el-row :gutter="16">
           <el-col :span="12">
@@ -145,11 +305,26 @@
         :sub-title="`成功 ${progress.ok_count} / 失败 ${progress.fail_count}`"
       >
         <template #extra>
-          <el-button type="primary" @click="resetTask">
-            开始新任务
-          </el-button>
+          <el-button type="primary" @click="resetTask">开始新任务</el-button>
+          <el-button @click="openOutputFolder">打开输出目录</el-button>
+          <el-button @click="loadHistory">刷新历史</el-button>
         </template>
       </el-result>
+
+      <div v-if="progress.result_files && progress.result_files.length > 0" class="result-files">
+        <h4>输出文件 ({{ progress.result_files.length }})</h4>
+        <div v-for="(f, i) in progress.result_files" :key="'out-'+i" class="result-item success-item">
+          <el-icon><CircleCheckFilled /></el-icon>
+          <span>{{ f }}</span>
+        </div>
+      </div>
+      <div v-if="progress.result_errors && progress.result_errors.length > 0" class="result-errors">
+        <h4>失败文件 ({{ progress.result_errors.length }})</h4>
+        <div v-for="(f, i) in progress.result_errors" :key="'err-'+i" class="result-item error-item">
+          <el-icon><CircleCloseFilled /></el-icon>
+          <span>{{ f }}</span>
+        </div>
+      </div>
     </el-card>
   </div>
 </template>
@@ -157,41 +332,159 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { uploadFiles, submitBatch, getCodecs } from '../api'
+import { CircleCheckFilled, CircleCloseFilled } from '@element-plus/icons-vue'
+import { uploadFiles, submitBatch, getCodecs, getHistory, openFolder, getEncoderParams, getAudioEncoderParams } from '../api'
 import { useSSE, type SseEvent } from '../composables/useSSE'
 import FileUploader, { type UploadFile } from '../components/FileUploader.vue'
 import ProgressPanel, { type ProgressState } from '../components/ProgressPanel.vue'
+
+// ---- 编码器能力（视频） ----
+interface EncoderCaps {
+  rate_controls: string[]
+  presets: string[]
+  tunes: string[]
+  profiles: string[]
+  pixel_fmts: string[]
+}
+
+const encoderCaps = reactive<EncoderCaps>({
+  rate_controls: [],
+  presets: [],
+  tunes: [],
+  profiles: [],
+  pixel_fmts: [],
+})
+
+const defaultCaps: EncoderCaps = {
+  rate_controls: [],
+  presets: [],
+  tunes: [],
+  profiles: [],
+  pixel_fmts: [],
+}
+
+function rateControlLabel(rc: string): string {
+  const map: Record<string, string> = {
+    crf: 'CRF (质量优先)',
+    cqp: 'CQP (固定量化)',
+    abr: 'ABR / VBR (平均码率)',
+    cbr: 'CBR (恒定码率)',
+    vbr: '受限 VBR (峰值约束)',
+  }
+  return map[rc] || rc.toUpperCase()
+}
+
+async function onVideoCodecChange(codec: string) {
+  if (!codec) {
+    Object.assign(encoderCaps, defaultCaps)
+    config.videoRateControl = ''
+    return
+  }
+  try {
+    const resp = await getEncoderParams(codec)
+    if (resp.data) {
+      Object.assign(encoderCaps, resp.data)
+      // 默认选中第一个码率控制模式
+      if (encoderCaps.rate_controls.length > 0) {
+        config.videoRateControl = encoderCaps.rate_controls[0]
+      }
+    }
+  } catch {
+    Object.assign(encoderCaps, defaultCaps)
+    config.videoRateControl = ''
+  }
+}
+
+function onRateControlChange(_rc: string) {
+  // 切换模式时清空相关字段避免混淆
+  config.videoCrf = 23
+  config.videoBitrate = ''
+  config.videoMaxrate = ''
+  config.videoBufsize = ''
+}
+
+// ---- 编码器能力（音频） ----
+interface AudioEncoderCaps {
+  sample_rates: number[]
+  channel_layouts: string[]
+  has_quality: boolean
+  has_bitrate: boolean
+}
+
+const audioCaps = reactive<AudioEncoderCaps>({
+  sample_rates: [],
+  channel_layouts: [],
+  has_quality: false,
+  has_bitrate: false,
+})
+
+const defaultAudioCaps: AudioEncoderCaps = {
+  sample_rates: [],
+  channel_layouts: [],
+  has_quality: false,
+  has_bitrate: false,
+}
+
+async function onAudioCodecChange(codec: string) {
+  if (!codec) {
+    Object.assign(audioCaps, defaultAudioCaps)
+    return
+  }
+  try {
+    const resp = await getAudioEncoderParams(codec)
+    if (resp.data) Object.assign(audioCaps, resp.data)
+  } catch {
+    Object.assign(audioCaps, defaultAudioCaps)
+  }
+}
 
 // ---- 文件 ----
 const selectedFiles = ref<UploadFile[]>([])
 
 // ---- 配置 ----
 const config = reactive({
-  outputDir: './output',
+  outputDir: './data/output',
   structure: 'by_type',
+  // 视频
   videoCodec: '',
+  videoRateControl: '',
   videoCrf: 23,
   videoBitrate: '',
+  videoMaxrate: '',
+  videoBufsize: '',
   videoPreset: '',
+  videoTune: '',
+  videoProfile: '',
   videoScale: '',
+  videoFps: '',
+  videoPixelFmt: '',
+  videoGop: 0,
+  videoThreads: 0,
+  // 音频
   audioCodec: '',
   audioBitrate: '',
+  audioSampleRate: '' as string | number,
+  audioChannelLayout: '',
+  // 容器
   format: '',
   overwrite: false,
 })
 
 // ---- 可用编解码器 ----
-const videoCodecs = ref<
-  { name: string; long_name: string; is_hardware: boolean }[]
->([])
+const videoCodecs = ref<{ name: string; long_name: string; is_hardware: boolean }[]>([])
+const audioCodecs = ref<{ name: string; long_name: string; is_hardware: boolean }[]>([])
 
 onMounted(async () => {
   try {
-    const resp = await getCodecs('video')
-    videoCodecs.value = resp.data.codecs || []
-  } catch {
-    // fallback
-  }
+    const [vResp, aResp] = await Promise.all([
+      getCodecs('video'),
+      getCodecs('audio'),
+    ])
+    videoCodecs.value = vResp.data.codecs || []
+    audioCodecs.value = aResp.data.codecs || []
+  } catch { /* fallback */ }
+
+  loadHistory()
 })
 
 // ---- 进度 ----
@@ -215,7 +508,40 @@ function onProgress(e: SseEvent) {
 const { connect: connectSSE } = useSSE(onProgress, () => {
   processing.value = false
   taskDone.value = true
+  loadHistory()
 })
+
+// ---- 处理历史 ----
+const historyOpen = ref<string[]>([])
+const history = ref<any[]>([])
+
+async function loadHistory() {
+  try {
+    const resp = await getHistory()
+    history.value = (resp.data || []).reverse()
+  } catch { /* ignore */ }
+}
+
+function formatTime(ts: number): string {
+  if (!ts) return ''
+  const d = new Date(ts * 1000)
+  return d.toLocaleString('zh-CN')
+}
+
+function openHistoryFolder(item: any) {
+  if (item.result_files && item.result_files[0]) {
+    openFolder(item.result_files[0].replace(/\/[^\/]+$/, ''))
+  }
+}
+
+async function openOutputFolder() {
+  try {
+    await openFolder(config.outputDir || './data/output')
+    ElMessage.success('已打开输出目录')
+  } catch {
+    ElMessage.error('无法打开目录')
+  }
+}
 
 // ---- 开始批量处理 ----
 async function startBatch() {
@@ -245,7 +571,7 @@ async function startBatch() {
     // 2. 构建批量清单
     const manifest: any = {
       output: {
-        dir: config.outputDir || './output',
+        dir: config.outputDir || './data/output',
         structure: config.structure,
       },
       defaults: {
@@ -257,20 +583,48 @@ async function startBatch() {
         // 视频配置
         const video: any = {}
         if (config.videoCodec) video.codec = config.videoCodec
-        if (config.videoCrf >= 0) video.crf = config.videoCrf
-        if (config.videoBitrate) video.bitrate = parseInt(config.videoBitrate)
+
+        // 码率控制 → 映射到 crf / bitrate / maxrate / bufsize
+        const rc = config.videoRateControl
+        if (rc === 'crf' || rc === 'cqp') {
+          if (config.videoCrf >= 0) video.crf = config.videoCrf
+        }
+        if (rc === 'abr' || rc === 'cbr' || rc === 'vbr') {
+          if (config.videoBitrate) video.bitrate = parseInt(config.videoBitrate)
+        }
+        if (rc === 'cbr') {
+          // CBR: maxrate = bitrate, bufsize = bitrate * 2
+          if (config.videoBitrate) {
+            video.maxrate = parseInt(config.videoBitrate)
+            video.bufsize = parseInt(config.videoBitrate) * 2
+          }
+        }
+        if (rc === 'vbr') {
+          if (config.videoMaxrate) video.maxrate = parseInt(config.videoMaxrate)
+          if (config.videoBufsize) video.bufsize = parseInt(config.videoBufsize)
+        }
+
         if (config.videoPreset) video.preset = config.videoPreset
+        if (config.videoTune) video.tune = config.videoTune
+        if (config.videoProfile) video.profile = config.videoProfile
         if (config.videoScale) {
           const [w, h] = config.videoScale.split('x').map(Number)
           if (w) video.width = w
           if (h) video.height = h
         }
+        if (config.videoFps) video.fps = parseFloat(config.videoFps)
+        if (config.videoPixelFmt) video.pixel_fmt = config.videoPixelFmt
+        if (config.videoGop > 0) video.gop_size = config.videoGop
+        if (config.videoThreads > 0) video.threads = config.videoThreads
+
         if (Object.keys(video).length > 0) job.video = video
 
         // 音频配置
         const audio: any = {}
         if (config.audioCodec) audio.codec = config.audioCodec
         if (config.audioBitrate) audio.bitrate = parseInt(config.audioBitrate)
+        if (config.audioSampleRate) audio.sample_rate = Number(config.audioSampleRate)
+        if (config.audioChannelLayout) audio.channel_layout = config.audioChannelLayout
         if (Object.keys(audio).length > 0) job.audio = audio
 
         // 容器
@@ -307,6 +661,8 @@ function resetTask() {
     ok_count: 0,
     fail_count: 0,
     error: '',
+    result_files: [],
+    result_errors: [],
   })
 }
 </script>
@@ -324,8 +680,90 @@ function resetTask() {
   color: #1a1a2e;
 }
 
+.history-panel {
+  margin-bottom: 16px;
+  background: #fafafa;
+  border-radius: 8px;
+}
+
+.history-list {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.history-entry {
+  padding: 10px 12px;
+  border-bottom: 1px solid #ebeef5;
+  font-size: 13px;
+}
+
+.history-entry:last-child {
+  border-bottom: none;
+}
+
+.hist-success {
+  border-left: 3px solid #67c23a;
+}
+
+.hist-fail {
+  border-left: 3px solid #f56c6c;
+}
+
+.hist-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.hist-time {
+  color: #909399;
+  font-size: 12px;
+}
+
+.hist-count {
+  color: #606266;
+}
+
+.hist-files {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.hist-file {
+  background: #ecf5ff;
+  color: #409eff;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  word-break: break-all;
+}
+
 .config-card {
   margin-top: 16px;
+}
+
+.advanced-collapse {
+  margin-top: 8px;
+  border: none;
+}
+
+.advanced-collapse :deep(.el-collapse-item__header) {
+  font-size: 13px;
+  color: #909399;
+  border: none;
+}
+
+.advanced-collapse :deep(.el-collapse-item__wrap) {
+  border: none;
+}
+
+.form-hint {
+  font-size: 12px;
+  color: #909399;
+  line-height: 32px;
 }
 
 .action-bar {
@@ -337,5 +775,33 @@ function resetTask() {
 
 .result-card {
   margin-top: 20px;
+}
+
+.result-files h4,
+.result-errors h4 {
+  font-size: 14px;
+  margin: 16px 0 8px;
+  color: #303133;
+}
+
+.result-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+
+.success-item {
+  background: #f0f9eb;
+  color: #67c23a;
+}
+
+.error-item {
+  background: #fef0f0;
+  color: #f56c6c;
 }
 </style>

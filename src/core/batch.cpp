@@ -227,12 +227,18 @@ TranscodeConfig BatchProcessor::merge_config(const BatchJobItem& job,
     }
     cfg.video.crf = job.video_crf;
     cfg.video.bitrate = job.video_bitrate;
+    cfg.video.maxrate = job.video_maxrate;
+    cfg.video.bufsize = job.video_bufsize;
     cfg.video.width = job.video_width;
     cfg.video.height = job.video_height;
     cfg.video.fps = job.video_fps;
     cfg.video.keep_aspect = job.video_keep_aspect;
     cfg.video.preset = job.video_preset.empty() ? nullptr : job.video_preset.c_str();
     cfg.video.tune = job.video_tune.empty() ? nullptr : job.video_tune.c_str();
+    cfg.video.profile = job.video_profile.empty() ? nullptr : job.video_profile.c_str();
+    cfg.video.pixel_fmt = job.video_pixel_fmt.empty() ? nullptr : job.video_pixel_fmt.c_str();
+    cfg.video.gop_size = job.video_gop_size;
+    cfg.video.threads = job.video_threads;
 
     // 音频
     if (job.audio_copy) {
@@ -243,6 +249,8 @@ TranscodeConfig BatchProcessor::merge_config(const BatchJobItem& job,
         cfg.audio.codec = nullptr;
     }
     cfg.audio.bitrate = job.audio_bitrate;
+    cfg.audio.sample_rate = job.audio_sample_rate;
+    cfg.audio.channel_layout = job.audio_channel_layout.empty() ? nullptr : job.audio_channel_layout.c_str();
 
     return cfg;
 }
@@ -267,12 +275,18 @@ static BatchJobItem parse_job_item(const json& j) {
         }
         item.video_crf     = v.contains("crf") ? v["crf"].get<int>() : -1;
         item.video_bitrate = v.contains("bitrate") ? v["bitrate"].get<int64_t>() : 0;
+        item.video_maxrate = v.contains("maxrate") ? v["maxrate"].get<int64_t>() : 0;
+        item.video_bufsize = v.contains("bufsize") ? v["bufsize"].get<int64_t>() : 0;
         item.video_width   = v.contains("width") ? v["width"].get<int>() : 0;
         item.video_height  = v.contains("height") ? v["height"].get<int>() : 0;
         item.video_fps     = v.contains("fps") ? v["fps"].get<double>() : 0.0;
         item.video_keep_aspect = v.value("keep_aspect", true);
         item.video_preset  = v.value("preset", "");
         item.video_tune    = v.value("tune", "");
+        item.video_profile = v.value("profile", "");
+        item.video_pixel_fmt = v.value("pixel_fmt", "");
+        item.video_gop_size  = v.contains("gop_size") ? v["gop_size"].get<int>() : 0;
+        item.video_threads   = v.contains("threads") ? v["threads"].get<int>() : 0;
     }
 
     if (j.contains("audio")) {
@@ -283,6 +297,8 @@ static BatchJobItem parse_job_item(const json& j) {
             item.audio_codec = a["codec"].get<std::string>();
         }
         item.audio_bitrate = a.contains("bitrate") ? a["bitrate"].get<int64_t>() : 0;
+        item.audio_sample_rate = a.contains("sample_rate") ? a["sample_rate"].get<int>() : 0;
+        item.audio_channel_layout = a.value("channel_layout", "");
     }
 
     if (j.contains("format"))
@@ -318,9 +334,7 @@ bool BatchProcessor::parse_manifest(const char* path) {
     if (j.contains("defaults")) {
         json d = j["defaults"];
         // 合并 defaults 下的 video/audio/format/overwrite 等
-        if (d.contains("video") || d.contains("audio") || d.contains("format")) {
-            defaults_ = parse_job_item(d);
-        }
+        defaults_ = parse_job_item(d);
     }
 
     // jobs
@@ -366,7 +380,7 @@ static BatchJobItem merge_job(const BatchJobItem& def, const BatchJobItem& job) 
     if (job.audio_bitrate > 0)       m.audio_bitrate = job.audio_bitrate;
 
     if (!job.format.empty())         m.format = job.format;
-    m.overwrite = job.overwrite;
+    if (job.overwrite)               m.overwrite = job.overwrite;
 
     return m;
 }
@@ -426,7 +440,7 @@ void BatchProcessor::process_all(ProgressCallback on_progress) {
             r.input = job.input;
             r.error = "no files matched";
             results_.push_back(r);
-            if (on_progress) on_progress((unsigned)i, (unsigned)jobs_.size(), JobStatus::Fail, job.input);
+            if (on_progress) on_progress((unsigned)i, (unsigned)jobs_.size(), JobStatus::Fail, job.input, "");
             continue;
         }
 
@@ -453,7 +467,7 @@ void BatchProcessor::process_all(ProgressCallback on_progress) {
                 r.output = out_path;
                 r.error = "file not found: " + files[f];
                 results_.push_back(r);
-                if (on_progress) on_progress((unsigned)i, (unsigned)jobs_.size(), JobStatus::Fail, files[f]);
+                if (on_progress) on_progress((unsigned)i, (unsigned)jobs_.size(), JobStatus::Fail, files[f], out_path);
                 continue;
             }
 
@@ -471,11 +485,11 @@ void BatchProcessor::process_all(ProgressCallback on_progress) {
                 r.output = out_path;
                 r.error = "output exists (use overwrite:true to force)";
                 results_.push_back(r);
-                if (on_progress) on_progress((unsigned)i, (unsigned)jobs_.size(), JobStatus::Fail, files[f]);
+                if (on_progress) on_progress((unsigned)i, (unsigned)jobs_.size(), JobStatus::Fail, files[f], out_path);
                 continue;
             }
 
-            if (on_progress) on_progress((unsigned)i, (unsigned)jobs_.size(), JobStatus::Processing, files[f]);
+            if (on_progress) on_progress((unsigned)i, (unsigned)jobs_.size(), JobStatus::Processing, files[f], out_path);
 
             BatchJobResult result;
             result.input = files[f];
@@ -486,7 +500,7 @@ void BatchProcessor::process_all(ProgressCallback on_progress) {
 
             if (on_progress) {
                 on_progress((unsigned)i, (unsigned)jobs_.size(),
-                             ok ? JobStatus::OK : JobStatus::Fail, files[f]);
+                             ok ? JobStatus::OK : JobStatus::Fail, files[f], out_path);
             }
         }
     }

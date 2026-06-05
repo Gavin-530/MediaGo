@@ -63,6 +63,8 @@ export interface ProgressState {
   ok_count: number
   fail_count: number
   error?: string
+  result_files?: string[]
+  result_errors?: string[]
 }
 
 const props = defineProps<{
@@ -72,9 +74,8 @@ const props = defineProps<{
 
 const percent = computed(() => {
   if (props.progress.total_jobs === 0) return 0
-  return Math.round(
-    (props.progress.current_job / props.progress.total_jobs) * 100
-  )
+  const done = props.progress.ok_count + props.progress.fail_count
+  return Math.round((done / props.progress.total_jobs) * 100)
 })
 
 const isRunning = computed(

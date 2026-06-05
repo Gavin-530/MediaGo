@@ -29,13 +29,14 @@ enum class JobStatus { Processing, OK, Fail };
 
 using ProgressCallback = std::function<void(unsigned index, unsigned total,
                                              JobStatus status,
-                                             const std::string& input)>;
+                                             const std::string& input,
+                                             const std::string& output)>;
 
 // ============================================================
 // 清单结构（内部解析用）
 // ============================================================
 struct BatchOutputCfg {
-    std::string dir = "./output";
+    std::string dir = "./data/output";
     std::string structure = "by_type"; // "flat" | "by_type"
 };
 
@@ -45,6 +46,8 @@ struct BatchJobItem {
     std::string video_codec;      // null/"copy"=拷贝
     int video_crf = -1;
     int64_t video_bitrate = 0;
+    int64_t video_maxrate = 0;
+    int64_t video_bufsize = 0;
     int video_width = 0;
     int video_height = 0;
     double video_fps = 0.0;
@@ -52,9 +55,15 @@ struct BatchJobItem {
     bool video_copy = false;
     std::string video_preset;
     std::string video_tune;
+    std::string video_profile;
+    std::string video_pixel_fmt;
+    int video_gop_size = 0;
+    int video_threads = 0;
 
     std::string audio_codec;     // null/"copy"=拷贝
     int64_t audio_bitrate = 0;
+    int audio_sample_rate = 0;
+    std::string audio_channel_layout;
     bool audio_copy = false;
 
     std::string format;          // 容器格式
@@ -69,6 +78,9 @@ public:
     // 加载并执行 JSON 清单
     bool process(const char* manifest_path,
                  ProgressCallback on_progress = nullptr);
+
+    // 最近一次错误（parse_manifest 失败时设置）
+    const std::string& last_error() const { return error_; }
 
 private:
     // JSON 解析
