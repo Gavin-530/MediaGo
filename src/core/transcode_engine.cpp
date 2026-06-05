@@ -16,6 +16,8 @@
 
 #include "transcode_engine.h"
 
+#include "nlohmann/json.hpp"
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavfilter/avfilter.h>
@@ -394,6 +396,40 @@ bool TranscodeEngine::setup_streams(const TranscodeConfig& cfg) {
                     av_opt_set(enc_ctx->priv_data, "profile", cfg.video.profile, 0);
                 }
 
+                // 高级编码参数
+                if (cfg.video.b_frames >= 0) {
+                    enc_ctx->max_b_frames = cfg.video.b_frames;
+                }
+                if (cfg.video.qmin >= 0) {
+                    enc_ctx->qmin = cfg.video.qmin;
+                }
+                if (cfg.video.qmax >= 0) {
+                    enc_ctx->qmax = cfg.video.qmax;
+                }
+                if (cfg.video.level) {
+                    av_opt_set(enc_ctx->priv_data, "level", cfg.video.level, 0);
+                }
+
+                // 编码器扩展参数（JSON → av_opt_set）
+                if (cfg.video.opts_json) {
+                    try {
+                        auto opts = nlohmann::json::parse(cfg.video.opts_json);
+                        for (auto& [key, val] : opts.items()) {
+                            if (val.is_string()) {
+                                av_opt_set(enc_ctx->priv_data, key.c_str(), val.get<std::string>().c_str(), 0);
+                            } else if (val.is_number_integer()) {
+                                av_opt_set_int(enc_ctx->priv_data, key.c_str(), val.get<int64_t>(), 0);
+                            } else if (val.is_number_float()) {
+                                av_opt_set_double(enc_ctx->priv_data, key.c_str(), val.get<double>(), 0);
+                            } else if (val.is_boolean()) {
+                                av_opt_set_int(enc_ctx->priv_data, key.c_str(), val.get<bool>() ? 1 : 0, 0);
+                            }
+                        }
+                    } catch (...) {
+                        fprintf(stderr, "  [warn] failed to parse video opts_json\n");
+                    }
+                }
+
                 // GOP
                 if (cfg.video.gop_size > 0) {
                     enc_ctx->gop_size = cfg.video.gop_size;
@@ -437,6 +473,31 @@ bool TranscodeEngine::setup_streams(const TranscodeConfig& cfg) {
 
                 if (cfg.audio.bitrate > 0) {
                     enc_ctx->bit_rate = cfg.audio.bitrate;
+                }
+
+                // 音频高级参数
+                if (cfg.audio.compression_level >= 0) {
+                    enc_ctx->compression_level = cfg.audio.compression_level;
+                }
+
+                // 音频编码器扩展参数
+                if (cfg.audio.opts_json) {
+                    try {
+                        auto opts = nlohmann::json::parse(cfg.audio.opts_json);
+                        for (auto& [key, val] : opts.items()) {
+                            if (val.is_string()) {
+                                av_opt_set(enc_ctx->priv_data, key.c_str(), val.get<std::string>().c_str(), 0);
+                            } else if (val.is_number_integer()) {
+                                av_opt_set_int(enc_ctx->priv_data, key.c_str(), val.get<int64_t>(), 0);
+                            } else if (val.is_number_float()) {
+                                av_opt_set_double(enc_ctx->priv_data, key.c_str(), val.get<double>(), 0);
+                            } else if (val.is_boolean()) {
+                                av_opt_set_int(enc_ctx->priv_data, key.c_str(), val.get<bool>() ? 1 : 0, 0);
+                            }
+                        }
+                    } catch (...) {
+                        fprintf(stderr, "  [warn] failed to parse audio opts_json\n");
+                    }
                 }
             }
 

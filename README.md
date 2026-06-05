@@ -27,12 +27,16 @@
 │              cpp-httplib · REST · SSE 进度推送                  │
 │                    http://localhost:9527                        │
 ├─────────────────────────────────────────────────────────────────┤
-│  POST /api/upload    │  多文件上传，保存临时目录                 │
-│  POST /api/batch     │  提交 JSON 清单，异步转码                 │
-│  GET  /api/progress  │  SSE 实时进度推送                        │
-│  GET  /api/probe     │  媒体属性探测                            │
-│  GET  /api/codecs    │  枚举可用编解码器                        │
-│  GET  /api/pixfmts   │  枚举可用像素格式                        │
+│  POST /api/upload             │  多文件上传，保存临时目录               │
+│  POST /api/batch              │  提交 JSON 清单，异步转码               │
+│  GET  /api/progress/:task_id  │  SSE 实时进度推送                      │
+│  GET  /api/probe              │  媒体属性探测                          │
+│  GET  /api/codecs             │  枚举可用编解码器                      │
+│  GET  /api/pixfmts            │  枚举可用像素格式                      │
+│  POST /api/encoder-params     │  按编码器查询私有参数（码率控制等）    │
+│  POST /api/audio-encoder-params│ 按音频编码器查询私有参数               │
+│  GET  /api/history            │  查询处理历史                          │
+│  POST /api/open-folder        │  打开资源管理器目录                    │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────────┐
@@ -198,12 +202,19 @@ MediaGo convert <input> <output> [options]
 |------|------|------|
 | `--vcodec` | `<name>` | 视频编码器，默认 copy |
 | `--acodec` | `<name>` | 音频编码器，默认 copy |
+| `--rate-control` | `<mode>` | 码率控制：crf / cqp / abr / cbr / vbr 等 |
 | `--crf` | `<0-51>` | CRF 质量控制 |
-| `--bitrate` | `<bps>` | 视频码率 |
+| `--bitrate` | `<bps>` | 码率 |
+| `--maxrate` | `<bps>` | 最大码率 (VBV) |
+| `--bufsize` | `<bps>` | 缓冲大小 (VBV) |
+| `--min-qp` | `<q>` | 最小 QP |
+| `--max-qp` | `<q>` | 最大 QP |
 | `--preset` | `<name>` | 编码器预设 |
+| `--tune` | `<name>` | 编码器调优 |
 | `--scale` | `<WxH>` | 缩放尺寸 |
 | `--fps` | `<rate>` | 目标帧率 |
 | `--format` | `<name>` | 输出容器格式 |
+| `--opts` | `<json>` | 编码器私有参数 JSON |
 | `--overwrite` | — | 覆盖已存在文件 |
 
 **示例：**
@@ -242,18 +253,27 @@ JSON 清单结构：
   "defaults": {
     "video": {
       "codec": null,
+      "rate_control": "crf",
       "crf": 23,
       "bitrate": 0,
+      "maxrate": 0,
+      "bufsize": 0,
+      "min_qp": -1,
+      "max_qp": -1,
       "width": 0,
       "height": 0,
       "fps": 0.0,
       "keep_aspect": true,
       "preset": "",
-      "tune": ""
+      "tune": "",
+      "opts_json": null
     },
     "audio": {
       "codec": "",
-      "bitrate": 0
+      "rate_control": "",
+      "bitrate": 0,
+      "quality": 0,
+      "opts_json": null
     }
   },
   "jobs": [
@@ -265,19 +285,28 @@ JSON 清单结构：
       "video": {
         "copy": false,
         "codec": "libx264",
+        "rate_control": "crf",
         "crf": 18,
         "bitrate": 0,
+        "maxrate": 5000000,
+        "bufsize": 10000000,
+        "min_qp": 10,
+        "max_qp": 40,
         "width": 1920,
         "height": 1080,
         "fps": 24,
         "keep_aspect": true,
         "preset": "medium",
-        "tune": "film"
+        "tune": "film",
+        "opts_json": null
       },
       "audio": {
         "copy": false,
         "codec": "aac",
-        "bitrate": 256000
+        "rate_control": "cbr",
+        "bitrate": 256000,
+        "quality": 0,
+        "opts_json": null
       }
     },
     {
@@ -306,16 +335,25 @@ JSON 清单结构：
 | `overwrite` | bool | 覆盖已存在文件 |
 | `video.copy` | bool | `true` = 视频流拷贝 |
 | `video.codec` | string | 视频编码器 |
+| `video.rate_control` | string | 码率控制模式：crf / cqp / abr / cbr / vbr / constqp 等 |
 | `video.crf` | int | CRF 质量控制 |
 | `video.bitrate` | int | 视频码率 |
+| `video.maxrate` | int | 最大码率 (VBV) |
+| `video.bufsize` | int | 缓冲大小 (VBV) |
+| `video.min_qp` | double | 最小 QP |
+| `video.max_qp` | double | 最大 QP |
 | `video.width` / `height` | int | 缩放尺寸 |
 | `video.fps` | double | 目标帧率 |
 | `video.keep_aspect` | bool | 保持宽高比（默认 true） |
 | `video.preset` | string | 编码器预设 |
 | `video.tune` | string | 编码器调优 |
+| `video.opts_json` | string | 编码器私有参数 JSON（av_opt_set） |
 | `audio.copy` | bool | `true` = 音频流拷贝 |
 | `audio.codec` | string | 音频编码器 |
+| `audio.rate_control` | string | 码率控制模式：cbr / abr / vbr / vbr_quality 等 |
 | `audio.bitrate` | int | 音频码率 |
+| `audio.quality` | double | 音频质量参数 |
+| `audio.opts_json` | string | 编码器私有参数 JSON（av_opt_set） |
 
 #### probe — 源文件属性探测
 
@@ -361,6 +399,10 @@ MediaGo pixfmts
 | `POST` | `/api/upload` | 多文件上传（multipart/form-data） |
 | `POST` | `/api/batch` | 提交批量转码（JSON 清单） |
 | `GET` | `/api/progress/:task_id` | SSE 实时进度推送 |
+| `POST` | `/api/encoder-params` | 查询编码器专属参数 `{"codec":"libx264"}` |
+| `POST` | `/api/audio-encoder-params` | 查询音频编码器参数 `{"codec":"aac"}` |
+| `GET` | `/api/history` | 处理历史记录 |
+| `POST` | `/api/open-folder` | 打开资源管理器目录 `{"dir":"path"}` |
 
 **curl 示例：**
 
@@ -376,14 +418,28 @@ curl -X POST http://127.0.0.1:9527/api/batch -H "Content-Type: application/json"
 
 # SSE 进度监控
 curl -N http://127.0.0.1:9527/api/progress/abc123
+
+# 查询编码器参数
+curl -X POST http://127.0.0.1:9527/api/encoder-params -H "Content-Type: application/json" -d '{"codec":"libx264"}'
+
+# 查询音频编码器参数
+curl -X POST http://127.0.0.1:9527/api/audio-encoder-params -H "Content-Type: application/json" -d '{"codec":"aac"}'
 ```
 
 ### GUI 页面
 
 | 页面 | 路径 | 功能 |
 |------|------|------|
-| 批量处理 | `/` | 拖拽上传 → 配置编码参数 → 异步转码 → SSE 实时进度 |
+| 批量处理 | `/` | 拖拽上传 → 配置编码参数（基础处理 + 高级选项） → 异步转码 → SSE 实时进度 |
 | 媒体探测 | `/probe` | 输入路径 → 查看编解码器、分辨率、颜色空间等属性 |
+
+批量处理页面支持：
+
+- **视频编码**：选择编码器后自动拉取该编码器支持的码率控制模式（CRF/CQP/ABR/CBR/VBR 等），按编码器真实支持罗列
+- **基础处理**：缩放 / 帧率 / 像素格式 / GOP 等编码器无关参数，始终可见
+- **高级选项**（折叠）：线程数 + 编码器专属参数（profile / level / bframes 等 FFmpeg 原生参数）
+- **音频编码**：独立码率控制（CBR/ABR/VBR/VBR-Quality 等），按编码器区分
+- **图片编码**：mjpeg / libwebp 等图片编码器独立于视频列表展示
 
 ## 核心 API
 
@@ -392,10 +448,13 @@ curl -N http://127.0.0.1:9527/api/progress/abc123
 ```cpp
 struct VideoConfig {
     const char* codec = nullptr;   // nullptr 或 "copy" = 流拷贝
+    const char* rate_control = nullptr; // crf / cqp / abr / cbr / vbr / constqp 等
     int crf = -1;                  // CRF (-1 = 编码器默认)
     int64_t bitrate = 0;           // 码率
     int64_t maxrate = 0;           // 最大码率 (VBV)
     int64_t bufsize = 0;           // 缓冲大小 (VBV)
+    double min_qp = -1;            // 最小 QP (-1 = 默认)
+    double max_qp = -1;            // 最大 QP (-1 = 默认)
     const char* preset = nullptr;  // 编码器预设
     const char* tune = nullptr;    // 编码器调优
     int width = 0;                 // 缩放宽度 (0 = 原始)
@@ -406,13 +465,17 @@ struct VideoConfig {
     int gop_size = 0;
     int threads = 0;
     const char* filters = nullptr; // 自定义 FFmpeg 滤镜图
+    const char* opts_json = nullptr; // 编码器私有参数 JSON（av_opt_set）
 };
 
 struct AudioConfig {
     const char* codec = nullptr;   // nullptr 或 "copy" = 流拷贝
+    const char* rate_control = nullptr; // cbr / abr / vbr / vbr_quality 等
     int64_t bitrate = 0;
+    double quality = 0;            // 音频质量参数（编码器相关）
     int sample_rate = 0;
     const char* channel_layout = nullptr;
+    const char* opts_json = nullptr; // 编码器私有参数 JSON（av_opt_set）
 };
 
 struct TranscodeConfig {
@@ -459,8 +522,13 @@ struct BatchJobItem {
     std::string input;            // 必填，支持通配符
     std::string output;           // 可选
     std::string video_codec;      // 空字符串 = 拷贝
+    std::string video_rate_control; // crf / cqp / abr / cbr / vbr 等
     int video_crf = -1;
     int64_t video_bitrate = 0;
+    int64_t video_maxrate = 0;
+    int64_t video_bufsize = 0;
+    double video_min_qp = -1;
+    double video_max_qp = -1;
     int video_width = 0;
     int video_height = 0;
     double video_fps = 0.0;
@@ -468,9 +536,13 @@ struct BatchJobItem {
     bool video_copy = false;
     std::string video_preset;
     std::string video_tune;
+    std::string video_opts_json;   // 视频编码器私有参数 JSON
     std::string audio_codec;      // 空字符串 = 拷贝
+    std::string audio_rate_control; // cbr / abr / vbr / vbr_quality 等
     int64_t audio_bitrate = 0;
+    double audio_quality = 0;
     bool audio_copy = false;
+    std::string audio_opts_json;   // 音频编码器私有参数 JSON
     std::string format;           // 容器格式
     bool overwrite = false;
 };
@@ -532,6 +604,7 @@ struct CodecInfo {
     bool is_encoder;
     bool is_decoder;
     bool is_hardware;
+    bool is_image;          // true = 图片编码器（mjpeg / libwebp 等）
 };
 
 struct PixelFmtInfo {

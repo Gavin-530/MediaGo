@@ -46,6 +46,7 @@ struct CodecInfo {
     bool is_encoder;
     bool is_decoder;
     bool is_hardware;
+    bool is_image;          // 图片编码器（mjpeg 等）
 };
 
 // 像素格式信息
@@ -59,7 +60,7 @@ struct PixelFmtInfo {
 // 枚举所有可用的编解码器
 // max_count: 最大返回数量；返回实际数量
 int config_list_codecs(CodecInfo* out, int max_count,
-                       bool encoders_only, bool video_only);
+                       bool encoders_only, bool video_only, bool audio_only = false);
 
 // 枚举所有可用的像素格式
 int config_list_pixel_fmts(PixelFmtInfo* out, int max_count);

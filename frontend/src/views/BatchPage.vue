@@ -98,23 +98,20 @@
 
         <!-- 码率控制参数（动态） -->
         <el-row v-if="config.videoCodec && encoderCaps.rate_controls.length > 0" :gutter="16">
-          <!-- CRF / CQP -->
-          <el-col v-if="config.videoRateControl === 'crf' || config.videoRateControl === 'cqp'" :span="8">
-            <el-form-item :label="config.videoRateControl === 'cqp' ? 'CQP 值' : 'CRF 质量'">
-              <el-input-number v-model="config.videoCrf" :min="0" :max="51" />
+          <!-- CRF / CQP / constqp / qscale（质量模式） -->
+          <el-col v-if="isQualityMode(config.videoRateControl)" :span="8">
+            <el-form-item :label="qualityModeLabel(config.videoRateControl)">
+              <el-input-number v-model="config.videoCrf" :min="0" :max="config.videoRateControl==='qscale'?31:63" />
             </el-form-item>
           </el-col>
-          <!-- 码率（ABR / CBR / VBR 都需要） -->
-          <el-col
-            v-if="config.videoRateControl === 'abr' || config.videoRateControl === 'cbr' || config.videoRateControl === 'vbr'"
-            :span="config.videoRateControl === 'vbr' ? 8 : 12"
-          >
+          <!-- 码率（所有需要目标码率的模式） -->
+          <el-col v-if="needsBitrate(config.videoRateControl)" :span="needsMaxrate(config.videoRateControl) ? 8 : 12">
             <el-form-item label="目标码率 (bps)">
               <el-input v-model="config.videoBitrate" placeholder="如 2000000" />
             </el-form-item>
           </el-col>
-          <!-- VBR 专属：最大码率 + 缓冲 -->
-          <template v-if="config.videoRateControl === 'vbr'">
+          <!-- VBR-类：最大码率 + 缓冲 -->
+          <template v-if="needsMaxrate(config.videoRateControl)">
             <el-col :span="8">
               <el-form-item label="最大码率 (bps)">
                 <el-input v-model="config.videoMaxrate" placeholder="如 4000000" />
@@ -127,8 +124,8 @@
             </el-col>
           </template>
           <!-- CBR 提示 -->
-          <el-col v-if="config.videoRateControl === 'cbr'" :span="12">
-            <span class="form-hint">CBR 模式会将最大码率固定为目标码率</span>
+          <el-col v-if="config.videoRateControl === 'cbr' || config.videoRateControl === 'constqp'" :span="12">
+            <span class="form-hint">恒定码率模式，码率严格限制</span>
           </el-col>
         </el-row>
 
@@ -157,43 +154,89 @@
           </el-col>
         </el-row>
 
-        <!-- 缩放 -->
+        <!-- 基础处理参数（编码器无关，始终可见） -->
+        <el-divider content-position="left">基础处理</el-divider>
         <el-row :gutter="16">
           <el-col :span="8">
             <el-form-item label="缩放">
               <el-input v-model="config.videoScale" placeholder="如 1920x1080" />
             </el-form-item>
           </el-col>
+          <el-col :span="8">
+            <el-form-item label="帧率 (fps)">
+              <el-input v-model="config.videoFps" placeholder="保持源帧率" />
+            </el-form-item>
+          </el-col>
+          <el-col v-if="encoderCaps.pixel_fmts.length > 0" :span="8">
+            <el-form-item label="像素格式">
+              <el-select v-model="config.videoPixelFmt" clearable placeholder="默认">
+                <el-option v-for="px in encoderCaps.pixel_fmts" :key="px" :label="px" :value="px" />
+              </el-select>
+            </el-form-item>
+          </el-col>
         </el-row>
+        <!-- 通用编码参数（general 分区，编码器无关但选择编码器后可见） -->
+        <template v-if="config.videoCodec">
+          <template v-for="sec in videoSections" :key="'g_'+sec.id">
+            <template v-if="sec.id === 'general' && sec.params.length > 0">
+              <el-row :gutter="16">
+                <template v-for="p in sec.params" :key="p.name">
+                  <el-col v-if="paramVisible(p)" :span="p.type === 'bool' ? 6 : 8">
+                    <el-form-item :label="p.label">
+                      <template v-if="p.type === 'select'">
+                        <el-select v-model="encoderParamValues[p.name]" clearable placeholder="默认">
+                          <el-option v-for="o in p.options" :key="o" :label="o" :value="o" />
+                        </el-select>
+                      </template>
+                      <template v-else-if="p.type === 'bool'">
+                        <el-switch v-model="encoderParamValues[p.name]" :active-value="1" :inactive-value="0" />
+                      </template>
+                      <template v-else-if="p.type === 'float'">
+                        <el-input-number v-model="encoderParamValues[p.name]" :min="p.min" :max="p.max" :step="0.1" :precision="1" placeholder="默认" />
+                      </template>
+                      <template v-else>
+                        <el-input-number v-model="encoderParamValues[p.name]" :min="p.min" :max="p.max" placeholder="默认" />
+                      </template>
+                    </el-form-item>
+                  </el-col>
+                </template>
+              </el-row>
+            </template>
+          </template>
+        </template>
 
-        <!-- 高级视频选项 -->
+        <!-- 高级选项（折叠）：线程数 + 编码器参数 -->
         <el-collapse v-if="config.videoCodec" class="advanced-collapse">
-          <el-collapse-item title="高级视频选项" name="video_adv">
-            <el-row :gutter="16">
-              <el-col :span="8">
-                <el-form-item label="帧率 (fps)">
-                  <el-input v-model="config.videoFps" placeholder="保持源帧率" />
-                </el-form-item>
-              </el-col>
-              <el-col v-if="encoderCaps.pixel_fmts.length > 0" :span="8">
-                <el-form-item label="像素格式">
-                  <el-select v-model="config.videoPixelFmt" clearable placeholder="默认">
-                    <el-option v-for="px in encoderCaps.pixel_fmts" :key="px" :label="px" :value="px" />
-                  </el-select>
-                </el-form-item>
-              </el-col>
-              <el-col :span="8">
-                <el-form-item label="GOP 大小">
-                  <el-input-number v-model="config.videoGop" :min="0" :step="10" placeholder="编码器默认" />
-                </el-form-item>
-              </el-col>
-            </el-row>
+          <el-collapse-item title="高级选项" name="video_adv">
             <el-row :gutter="16">
               <el-col :span="8">
                 <el-form-item label="线程数">
                   <el-input-number v-model="config.videoThreads" :min="0" placeholder="自动" />
                 </el-form-item>
               </el-col>
+            </el-row>
+            <!-- 编码器专有参数 -->
+            <el-row :gutter="16">
+              <template v-for="p in nonGeneralVideoParams" :key="p.name">
+                <el-col v-if="paramVisible(p)" :span="p.type === 'bool' ? 6 : 8">
+                  <el-form-item :label="p.label">
+                    <template v-if="p.type === 'select'">
+                      <el-select v-model="encoderParamValues[p.name]" clearable placeholder="默认">
+                        <el-option v-for="o in p.options" :key="o" :label="o" :value="o" />
+                      </el-select>
+                    </template>
+                    <template v-else-if="p.type === 'bool'">
+                      <el-switch v-model="encoderParamValues[p.name]" :active-value="1" :inactive-value="0" />
+                    </template>
+                    <template v-else-if="p.type === 'float'">
+                      <el-input-number v-model="encoderParamValues[p.name]" :min="p.min" :max="p.max" :step="0.1" :precision="1" placeholder="默认" />
+                    </template>
+                    <template v-else>
+                      <el-input-number v-model="encoderParamValues[p.name]" :min="p.min" :max="p.max" placeholder="默认" />
+                    </template>
+                  </el-form-item>
+                </el-col>
+              </template>
             </el-row>
           </el-collapse-item>
         </el-collapse>
@@ -213,7 +256,22 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col v-if="audioCaps.has_bitrate" :span="12">
+          <!-- 音频码率控制选择器 -->
+          <el-col v-if="audioCaps.rate_controls.length > 0" :span="6">
+            <el-form-item label="码率控制">
+              <el-select v-model="audioRateControl" @change="onAudioRateControlChange">
+                <el-option v-for="rc in audioCaps.rate_controls" :key="rc" :label="audioRCLabel(rc)" :value="rc" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <!-- VBR质量值 -->
+          <el-col v-if="audioRateControl === 'vbr_quality'" :span="6">
+            <el-form-item label="质量 (VBR)">
+              <el-input-number v-model="config.audioQuality" :min="0" :max="9" placeholder="默认" />
+            </el-form-item>
+          </el-col>
+          <!-- 码率 -->
+          <el-col v-if="['cbr','abr','vbr','constrained_vbr'].includes(audioRateControl) || audioCaps.rate_controls.length === 0" :span="6">
             <el-form-item label="码率 (bps)">
               <el-input v-model="config.audioBitrate" placeholder="如 128000" />
             </el-form-item>
@@ -245,6 +303,51 @@
             </el-form-item>
           </el-col>
         </el-row>
+
+        <!-- 音频编码器参数 -->
+        <template v-if="config.audioCodec && allAudioParams.length > 0">
+          <el-row :gutter="16">
+            <template v-for="p in allAudioParams" :key="p.name">
+              <el-col :span="p.type === 'bool' ? 6 : 8">
+                <el-form-item :label="p.label">
+                  <template v-if="p.type === 'select'">
+                    <el-select v-model="audioParamValues[p.name]" clearable placeholder="默认">
+                      <el-option v-for="o in p.options" :key="o" :label="o" :value="o" />
+                    </el-select>
+                  </template>
+                  <template v-else-if="p.type === 'bool'">
+                    <el-switch v-model="audioParamValues[p.name]" :active-value="1" :inactive-value="0" />
+                  </template>
+                  <template v-else-if="p.type === 'float'">
+                    <el-input-number v-model="audioParamValues[p.name]" :min="p.min" :max="p.max" :step="0.1" :precision="1" placeholder="默认" />
+                  </template>
+                  <template v-else>
+                    <el-input-number v-model="audioParamValues[p.name]" :min="p.min" :max="p.max" placeholder="默认" />
+                  </template>
+                </el-form-item>
+              </el-col>
+            </template>
+          </el-row>
+        </template>
+
+        <!-- ============ 图片编码 ============ -->
+        <template v-if="imageCodecs.length > 0">
+          <el-divider content-position="left">图片编码</el-divider>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="编码器">
+                <el-select v-model="config.imageCodec" clearable filterable placeholder="默认 = 不编码图片" @change="onImageCodecChange">
+                  <el-option
+                    v-for="c in imageCodecs"
+                    :key="c.name"
+                    :label="`${c.name} (${c.long_name})`"
+                    :value="c.name"
+                  />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+        </template>
 
         <!-- ============ 容器 ============ -->
         <el-divider />
@@ -330,7 +433,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { CircleCheckFilled, CircleCloseFilled } from '@element-plus/icons-vue'
 import { uploadFiles, submitBatch, getCodecs, getHistory, openFolder, getEncoderParams, getAudioEncoderParams } from '../api'
@@ -339,12 +442,33 @@ import FileUploader, { type UploadFile } from '../components/FileUploader.vue'
 import ProgressPanel, { type ProgressState } from '../components/ProgressPanel.vue'
 
 // ---- 编码器能力（视频） ----
+interface ParamDef {
+  name: string
+  label: string
+  type: string         // "int" | "select" | "float" | "bool"
+  min: number
+  max: number
+  default: number
+  options?: string[]
+  when_field?: string
+  when_value?: string
+  desc?: string
+}
+
+interface ParamSection {
+  id: string
+  label: string
+  expanded: boolean
+  params: ParamDef[]
+}
+
 interface EncoderCaps {
   rate_controls: string[]
   presets: string[]
   tunes: string[]
   profiles: string[]
   pixel_fmts: string[]
+  param_sections: ParamSection[]
 }
 
 const encoderCaps = reactive<EncoderCaps>({
@@ -353,6 +477,7 @@ const encoderCaps = reactive<EncoderCaps>({
   tunes: [],
   profiles: [],
   pixel_fmts: [],
+  param_sections: [],
 })
 
 const defaultCaps: EncoderCaps = {
@@ -361,15 +486,59 @@ const defaultCaps: EncoderCaps = {
   tunes: [],
   profiles: [],
   pixel_fmts: [],
+  param_sections: [],
+}
+
+// 动态参数值
+const encoderParamValues = reactive<Record<string, number | string>>({})
+
+// 分区参数列表
+const videoSections = computed(() => encoderCaps.param_sections)
+
+// 所有参数扁平列表（用于取值遍历）
+const videoParams = computed(() => encoderCaps.param_sections.flatMap(s => s.params))
+
+// 非通用参数扁平列表（codec + advanced 分区，用于高级选项）
+const nonGeneralVideoParams = computed(() =>
+  encoderCaps.param_sections
+    .filter(s => s.id !== 'general')
+    .flatMap(s => s.params)
+)
+
+// 判断参数是否应在当前条件下显示
+function paramVisible(p: ParamDef): boolean {
+  if (!p.when_field) return true
+  if (p.when_field === 'rate_control') {
+    return config.videoRateControl === p.when_value
+  }
+  // 通用条件：检查另一个参数的值
+  const targetVal = encoderParamValues[p.when_field] ?? audioParamValues[p.when_field]
+  if (p.when_value === '>0') {
+    return Number(targetVal) > 0
+  }
+  return String(targetVal) === p.when_value
 }
 
 function rateControlLabel(rc: string): string {
   const map: Record<string, string> = {
     crf: 'CRF (质量优先)',
     cqp: 'CQP (固定量化)',
-    abr: 'ABR / VBR (平均码率)',
+    constqp: 'CQP (固定量化)',
+    abr: 'ABR (平均码率)',
     cbr: 'CBR (恒定码率)',
-    vbr: '受限 VBR (峰值约束)',
+    cbr_hq: 'CBR HQ (高质量恒定码率)',
+    cbr_ld_hq: 'CBR LD HQ (低延迟高质量)',
+    vbr: 'VBR (可变码率)',
+    vbr_hq: 'VBR HQ (高质量可变码率)',
+    vbr_peak: 'VBR Peak (峰值约束)',
+    vbr_latency: 'VBR Latency (低延迟)',
+    qvbr: 'QVBR (质量可变)',
+    hqvbr: 'HQVBR (高质量可变)',
+    hqcbr: 'HQCBR (高质量恒定)',
+    avbr: 'AVBR (自适应码率)',
+    icq: 'ICQ (智能恒定质量)',
+    la: 'LA (前瞻VBR)',
+    qscale: 'QScale (质量缩放)',
   }
   return map[rc] || rc.toUpperCase()
 }
@@ -378,6 +547,8 @@ async function onVideoCodecChange(codec: string) {
   if (!codec) {
     Object.assign(encoderCaps, defaultCaps)
     config.videoRateControl = ''
+    // 清空动态参数值
+    Object.keys(encoderParamValues).forEach(k => delete encoderParamValues[k])
     return
   }
   try {
@@ -388,10 +559,20 @@ async function onVideoCodecChange(codec: string) {
       if (encoderCaps.rate_controls.length > 0) {
         config.videoRateControl = encoderCaps.rate_controls[0]
       }
+      // 初始化动态参数默认值
+      Object.keys(encoderParamValues).forEach(k => delete encoderParamValues[k])
+      for (const sec of encoderCaps.param_sections) {
+        for (const p of sec.params) {
+          if (p.type === 'bool') {
+            encoderParamValues[p.name] = (p.default === 1) ? 1 : 0
+          }
+        }
+      }
     }
   } catch {
     Object.assign(encoderCaps, defaultCaps)
     config.videoRateControl = ''
+    Object.keys(encoderParamValues).forEach(k => delete encoderParamValues[k])
   }
 }
 
@@ -403,12 +584,32 @@ function onRateControlChange(_rc: string) {
   config.videoBufsize = ''
 }
 
+// 质量模式：CRF / CQP / constqp / qscale / icq
+function isQualityMode(rc: string): boolean {
+  return ['crf','cqp','constqp','qscale'].includes(rc)
+}
+function qualityModeLabel(rc: string): string {
+  const map: Record<string, string> = { crf:'CRF 质量', cqp:'CQP 值', constqp:'CQP 值', qscale:'QScale 值' }
+  return map[rc] || '质量值'
+}
+// 需要目标码率的模式
+function needsBitrate(rc: string): boolean {
+  const modes = ['abr','cbr','vbr','vbr_hq','vbr_peak','vbr_latency','cbr_hq','cbr_ld_hq','hqcbr','hqvbr','qvbr','avbr','la']
+  return modes.includes(rc)
+}
+// VBR-类需要峰值约束
+function needsMaxrate(rc: string): boolean {
+  return ['vbr','vbr_hq','vbr_peak','vbr_latency','hqvbr','la'].includes(rc)
+}
+
 // ---- 编码器能力（音频） ----
 interface AudioEncoderCaps {
   sample_rates: number[]
   channel_layouts: string[]
   has_quality: boolean
   has_bitrate: boolean
+  rate_controls: string[]
+  param_sections: ParamSection[]
 }
 
 const audioCaps = reactive<AudioEncoderCaps>({
@@ -416,6 +617,8 @@ const audioCaps = reactive<AudioEncoderCaps>({
   channel_layouts: [],
   has_quality: false,
   has_bitrate: false,
+  rate_controls: [],
+  param_sections: [],
 })
 
 const defaultAudioCaps: AudioEncoderCaps = {
@@ -423,18 +626,73 @@ const defaultAudioCaps: AudioEncoderCaps = {
   channel_layouts: [],
   has_quality: false,
   has_bitrate: false,
+  rate_controls: [],
+  param_sections: [],
 }
+
+// 音频码率控制
+const audioRateControl = ref('')
+
+function onAudioRateControlChange(rc: string) {
+  audioRateControl.value = rc
+}
+
+function audioRCLabel(rc: string): string {
+  const map: Record<string, string> = {
+    cbr: 'CBR (恒定码率)',
+    abr: 'ABR (平均码率)',
+    vbr: 'VBR (可变码率)',
+    vbr_quality: 'VBR (质量优先)',
+    constrained_vbr: '约束VBR',
+    lossless: '无损',
+  }
+  return map[rc] || rc.toUpperCase()
+}
+
+async function onImageCodecChange(_codec: string) {
+  // 图片编码器：加载参数（可复用视频 encoder-params API）
+  if (!_codec) return
+  try {
+    const resp = await getEncoderParams(_codec)
+    if (resp.data) {
+      // 图片编码器暂时只使用码率控制面板，不覆盖视频 encoderCaps
+    }
+  } catch { /* ignore */ }
+}
+
+const audioParamValues = reactive<Record<string, number | string>>({})
+
+const audioSections = computed(() => audioCaps.param_sections)
+
+const audioParams = computed(() => audioCaps.param_sections.flatMap(s => s.params))
+
+const allAudioParams = computed(() => audioCaps.param_sections.flatMap(s => s.params))
 
 async function onAudioCodecChange(codec: string) {
   if (!codec) {
     Object.assign(audioCaps, defaultAudioCaps)
+    Object.keys(audioParamValues).forEach(k => delete audioParamValues[k])
     return
   }
   try {
     const resp = await getAudioEncoderParams(codec)
-    if (resp.data) Object.assign(audioCaps, resp.data)
+    if (resp.data) {
+      Object.assign(audioCaps, resp.data)
+      // 默认选择第一个码率控制模式
+      audioRateControl.value = audioCaps.rate_controls.length > 0 ? audioCaps.rate_controls[0] : ''
+      // 初始化动态参数默认值
+      Object.keys(audioParamValues).forEach(k => delete audioParamValues[k])
+      for (const sec of audioCaps.param_sections) {
+        for (const p of sec.params) {
+          if (p.type === 'bool') {
+            audioParamValues[p.name] = (p.default === 1) ? 1 : 0
+          }
+        }
+      }
+    }
   } catch {
     Object.assign(audioCaps, defaultAudioCaps)
+    Object.keys(audioParamValues).forEach(k => delete audioParamValues[k])
   }
 }
 
@@ -468,11 +726,14 @@ const config = reactive({
   // 容器
   format: '',
   overwrite: false,
+  // 图片
+  imageCodec: '',
 })
 
 // ---- 可用编解码器 ----
-const videoCodecs = ref<{ name: string; long_name: string; is_hardware: boolean }[]>([])
-const audioCodecs = ref<{ name: string; long_name: string; is_hardware: boolean }[]>([])
+const videoCodecs = ref<{ name: string; long_name: string; is_hardware: boolean; is_image: boolean }[]>([])
+const audioCodecs = ref<{ name: string; long_name: string; is_hardware: boolean; is_image: boolean }[]>([])
+const imageCodecs = ref<{ name: string; long_name: string; is_hardware: boolean; is_image: boolean }[]>([])
 
 onMounted(async () => {
   try {
@@ -480,7 +741,9 @@ onMounted(async () => {
       getCodecs('video'),
       getCodecs('audio'),
     ])
-    videoCodecs.value = vResp.data.codecs || []
+    const allVideo = vResp.data.codecs || []
+    videoCodecs.value = allVideo.filter((c: any) => !c.is_image)
+    imageCodecs.value = allVideo.filter((c: any) => c.is_image)
     audioCodecs.value = aResp.data.codecs || []
   } catch { /* fallback */ }
 
@@ -617,6 +880,22 @@ async function startBatch() {
         if (config.videoGop > 0) video.gop_size = config.videoGop
         if (config.videoThreads > 0) video.threads = config.videoThreads
 
+        // 编码器专有参数 → opts JSON（根据 param 定义的类型转换）
+        const videoOpts: Record<string, any> = {}
+        for (const [key, val] of Object.entries(encoderParamValues)) {
+          if (val !== '' && val !== undefined && val !== -1) {
+            const paramDef = videoParams.value.find(p => p.name === key)
+            if (paramDef?.type === 'bool') {
+              videoOpts[key] = val === 1 || val === '1' || val === true
+            } else if (typeof val === 'string') {
+              videoOpts[key] = val
+            } else {
+              videoOpts[key] = Number(val)
+            }
+          }
+        }
+        if (Object.keys(videoOpts).length > 0) video.opts = videoOpts
+
         if (Object.keys(video).length > 0) job.video = video
 
         // 音频配置
@@ -625,6 +904,25 @@ async function startBatch() {
         if (config.audioBitrate) audio.bitrate = parseInt(config.audioBitrate)
         if (config.audioSampleRate) audio.sample_rate = Number(config.audioSampleRate)
         if (config.audioChannelLayout) audio.channel_layout = config.audioChannelLayout
+
+        // 音频编码器专有参数 → opts JSON（根据 param 定义的类型转换）
+        const audioOpts: Record<string, any> = {}
+        for (const [key, val] of Object.entries(audioParamValues)) {
+          if (val !== '' && val !== undefined && val !== -1) {
+            const paramDef = audioParams.value.find(p => p.name === key)
+            if (paramDef?.type === 'bool') {
+              audioOpts[key] = val === 1 || val === '1' || val === true
+            } else if (typeof val === 'string') {
+              audioOpts[key] = val
+            } else if (typeof val === 'boolean') {
+              audioOpts[key] = val
+            } else {
+              audioOpts[key] = Number(val)
+            }
+          }
+        }
+        if (Object.keys(audioOpts).length > 0) audio.opts = audioOpts
+
         if (Object.keys(audio).length > 0) job.audio = audio
 
         // 容器
@@ -764,6 +1062,13 @@ function resetTask() {
   font-size: 12px;
   color: #909399;
   line-height: 32px;
+}
+
+.section-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #606266;
+  margin-bottom: 4px;
 }
 
 .action-bar {

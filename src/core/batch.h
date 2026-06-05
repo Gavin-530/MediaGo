@@ -59,11 +59,18 @@ struct BatchJobItem {
     std::string video_pixel_fmt;
     int video_gop_size = 0;
     int video_threads = 0;
+    int video_b_frames = -1;
+    int video_qmin = -1;
+    int video_qmax = -1;
+    std::string video_level;
+    std::string video_opts_json;   // JSON: 编码器专有扩展参数
 
-    std::string audio_codec;     // null/"copy"=拷贝
+    std::string audio_codec;
     int64_t audio_bitrate = 0;
     int audio_sample_rate = 0;
     std::string audio_channel_layout;
+    int audio_compression_level = -1;
+    std::string audio_opts_json;   // JSON: 音频编码器专有扩展参数
     bool audio_copy = false;
 
     std::string format;          // 容器格式

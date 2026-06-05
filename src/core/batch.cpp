@@ -239,6 +239,11 @@ TranscodeConfig BatchProcessor::merge_config(const BatchJobItem& job,
     cfg.video.pixel_fmt = job.video_pixel_fmt.empty() ? nullptr : job.video_pixel_fmt.c_str();
     cfg.video.gop_size = job.video_gop_size;
     cfg.video.threads = job.video_threads;
+    cfg.video.b_frames = job.video_b_frames;
+    cfg.video.qmin = job.video_qmin;
+    cfg.video.qmax = job.video_qmax;
+    cfg.video.level = job.video_level.empty() ? nullptr : job.video_level.c_str();
+    cfg.video.opts_json = job.video_opts_json.empty() ? nullptr : job.video_opts_json.c_str();
 
     // 音频
     if (job.audio_copy) {
@@ -251,6 +256,8 @@ TranscodeConfig BatchProcessor::merge_config(const BatchJobItem& job,
     cfg.audio.bitrate = job.audio_bitrate;
     cfg.audio.sample_rate = job.audio_sample_rate;
     cfg.audio.channel_layout = job.audio_channel_layout.empty() ? nullptr : job.audio_channel_layout.c_str();
+    cfg.audio.compression_level = job.audio_compression_level;
+    cfg.audio.opts_json = job.audio_opts_json.empty() ? nullptr : job.audio_opts_json.c_str();
 
     return cfg;
 }
@@ -287,6 +294,13 @@ static BatchJobItem parse_job_item(const json& j) {
         item.video_pixel_fmt = v.value("pixel_fmt", "");
         item.video_gop_size  = v.contains("gop_size") ? v["gop_size"].get<int>() : 0;
         item.video_threads   = v.contains("threads") ? v["threads"].get<int>() : 0;
+        item.video_b_frames  = v.contains("b_frames") ? v["b_frames"].get<int>() : -1;
+        item.video_qmin      = v.contains("qmin") ? v["qmin"].get<int>() : -1;
+        item.video_qmax      = v.contains("qmax") ? v["qmax"].get<int>() : -1;
+        item.video_level     = v.value("level", "");
+        if (v.contains("opts") && v["opts"].is_object()) {
+            item.video_opts_json = v["opts"].dump();
+        }
     }
 
     if (j.contains("audio")) {
@@ -299,6 +313,10 @@ static BatchJobItem parse_job_item(const json& j) {
         item.audio_bitrate = a.contains("bitrate") ? a["bitrate"].get<int64_t>() : 0;
         item.audio_sample_rate = a.contains("sample_rate") ? a["sample_rate"].get<int>() : 0;
         item.audio_channel_layout = a.value("channel_layout", "");
+        item.audio_compression_level = a.contains("compression_level") ? a["compression_level"].get<int>() : -1;
+        if (a.contains("opts") && a["opts"].is_object()) {
+            item.audio_opts_json = a["opts"].dump();
+        }
     }
 
     if (j.contains("format"))
@@ -374,10 +392,12 @@ static BatchJobItem merge_job(const BatchJobItem& def, const BatchJobItem& job) 
     if (!job.video_preset.empty())   m.video_preset = job.video_preset;
     if (!job.video_tune.empty())     m.video_tune = job.video_tune;
     m.video_keep_aspect = job.video_keep_aspect;
+    if (!job.video_opts_json.empty()) m.video_opts_json = job.video_opts_json;
 
     if (!job.audio_codec.empty())    m.audio_codec = job.audio_codec;
     if (job.audio_copy)              { m.audio_copy = true; m.audio_codec.clear(); }
     if (job.audio_bitrate > 0)       m.audio_bitrate = job.audio_bitrate;
+    if (!job.audio_opts_json.empty()) m.audio_opts_json = job.audio_opts_json;
 
     if (!job.format.empty())         m.format = job.format;
     if (job.overwrite)               m.overwrite = job.overwrite;

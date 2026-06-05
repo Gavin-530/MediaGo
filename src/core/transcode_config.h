@@ -54,6 +54,23 @@ struct VideoConfig {
 
     // 自定义滤镜图（为空则不添加额外滤镜，仅在编码路径有效）
     const char* filters = nullptr;
+
+    // ---- 编码器高级参数 ----
+
+    // B帧最大连续数（-1=编码器默认）
+    int b_frames = -1;
+
+    // 最小量化器（-1=编码器默认）
+    int qmin = -1;
+
+    // 最大量化器（-1=编码器默认，仅特定模式有效）
+    int qmax = -1;
+
+    // 编码级别（"4.0" "4.1" "5.1" 等，nullptr=自动）
+    const char* level = nullptr;
+
+    // 编码器专有扩展参数（JSON key-value 对象，引擎层 av_opt_set 注入）
+    const char* opts_json = nullptr;
 };
 
 // ============================================================
@@ -72,6 +89,14 @@ struct AudioConfig {
 
     // 声道布局（nullptr=保持）
     const char* channel_layout = nullptr;
+
+    // ---- 编码器高级参数 ----
+
+    // 压缩级别：FLAC 0-12, libopus 0-10, libmp3lame 0-9（-1=编码器默认）
+    int compression_level = -1;
+
+    // 编码器专有扩展参数（JSON key-value 对象）
+    const char* opts_json = nullptr;
 };
 
 // ============================================================

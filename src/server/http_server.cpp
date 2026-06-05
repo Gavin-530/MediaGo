@@ -482,12 +482,14 @@ void MediaGoServer::register_routes() {
     // ---- 编解码器列表 ----
     svr.Get("/api/codecs", [](const httplib::Request& req, httplib::Response& res) {
         bool video_only = true;
+        bool audio_only = false;
         if (req.has_param("type") && req.get_param_value("type") == "audio") {
             video_only = false;
+            audio_only = true;
         }
 
         CodecInfo codecs[200];
-        int n = config_list_codecs(codecs, 200, true, video_only);
+        int n = config_list_codecs(codecs, 200, true, video_only, audio_only);
 
         json j;
         j["codecs"] = json::array();
@@ -498,6 +500,7 @@ void MediaGoServer::register_routes() {
             c["long_name"] = codecs[i].long_name;
             c["type"] = codecs[i].type;
             c["is_hardware"] = codecs[i].is_hardware;
+            c["is_image"] = codecs[i].is_image;
             j["codecs"].push_back(c);
         }
         res.set_content(j.dump(), "application/json");
@@ -603,19 +606,358 @@ void MediaGoServer::register_routes() {
         json result;
         result["codec"] = codec;
 
+        // 编码器能力结构
         struct EncoderProfile {
-            std::vector<const char*> rate_controls; // crf / cqp / abr / cbr / vbr
+            std::vector<const char*> rate_controls;
             std::vector<const char*> presets;
             std::vector<const char*> tunes;
-            std::vector<const char*> profiles;       // baseline / main / high ...
+            std::vector<const char*> profiles;
             std::vector<const char*> pixel_fmts;
         };
 
+        struct ParamDef {
+            const char* name;
+            const char* label;
+            const char* type;        // "int" / "select" / "float" / "bool"
+            const char* section;     // "general" / "codec" / "advanced"
+            const char* when_field;
+            const char* when_value;
+            const char* desc;        // tooltip, may be nullptr
+            int min_val, max_val, default_val;
+            std::vector<const char*> options;
+        };
+
+        // Helper: 序列化单个 ParamDef 到 JSON
+        auto param_to_json = [](const ParamDef& pd) {
+            json param = {
+                {"name",    pd.name},
+                {"label",   pd.label},
+                {"type",    pd.type},
+                {"min",     pd.min_val},
+                {"max",     pd.max_val},
+                {"default", pd.default_val},
+            };
+            if (pd.when_field) {
+                param["when_field"] = pd.when_field;
+                param["when_value"] = pd.when_value;
+            }
+            if (pd.desc) param["desc"] = pd.desc;
+            if (!pd.options.empty()) {
+                json opts = json::array();
+                for (auto& o : pd.options) opts.push_back(o);
+                param["options"] = opts;
+            }
+            return param;
+        };
+
+        // 编码器→分区→参数映射
+        std::map<std::string, std::map<std::string, std::vector<ParamDef>>> section_maps;
+
+        // ======== libx264 / libx264rgb ========
+        for (auto& s : {"libx264","libx264rgb"}) {
+            section_maps[s]["general"] = {
+                {"gop_size","关键帧间隔","int","general",nullptr,nullptr,nullptr,0,300,0,{}},
+                {"b_frames","B帧数量","int","general",nullptr,nullptr,nullptr,0,16,-1,{}},
+                {"qmin","最小QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"qmax","最大QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"level","编码级别","select","general",nullptr,nullptr,nullptr,0,0,-1,
+                 {"3.0","3.1","4.0","4.1","4.2","5.0","5.1","5.2","6.0","6.1","6.2"}},
+            };
+            section_maps[s]["codec"] = {
+                {"aq-mode","AQ模式","select","codec","rate_control","crf",nullptr,0,0,-1,
+                 {"none","variance","autovariance","autovariance-biased"}},
+                {"aq-strength","AQ强度","float","codec","rate_control","crf",nullptr,0,0,-1,{}},
+                {"rc-lookahead","前瞻帧数","int","codec","rate_control","crf",nullptr,-1,250,-1,{}},
+                {"b-pyramid","B帧金字塔","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"none","strict","normal"}},
+                {"weightp","加权预测模式","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"none","simple","smart"}},
+                {"crf_max","CRF上限","float","codec","rate_control","crf",nullptr,0,0,-1,{}},
+                {"fast-pskip","快速P跳过","bool","codec",nullptr,nullptr,"快速跳过P帧的检测",0,0,0,{}},
+                {"8x8dct","8x8 DCT变换","bool","codec",nullptr,nullptr,"开启high profile 8x8变换",0,0,0,{}},
+                {"mixed-refs","混合参考帧","bool","codec",nullptr,nullptr,"每分区独立参考帧",0,0,0,{}},
+                {"aud","访问单元分隔符","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"no-deblock","去块滤波","bool","codec",nullptr,nullptr,"禁用环路滤波",0,0,0,{}},
+                {"chromaoffset","色度偏移","int","codec",nullptr,nullptr,nullptr,-10,10,0,{}},
+                {"sc_threshold","场景检测阈值","int","codec",nullptr,nullptr,"场景切换敏感度",-1,2147483647,-1,{}},
+            };
+            section_maps[s]["advanced"] = {};
+        }
+
+        // ======== libx265 ========
+        {
+            section_maps["libx265"]["general"] = {
+                {"gop_size","关键帧间隔","int","general",nullptr,nullptr,nullptr,0,300,0,{}},
+                {"b_frames","B帧数量","int","general",nullptr,nullptr,nullptr,0,16,-1,{}},
+                {"qmin","最小QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"qmax","最大QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+            };
+            section_maps["libx265"]["codec"] = {
+                {"aq-mode","AQ模式","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"none","variance","autovariance","autovariance-biased"}},
+                {"aq-strength","AQ强度","float","codec",nullptr,nullptr,nullptr,0,0,-1,{}},
+                {"ctu","CTU大小","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"16","32","64"}},
+                {"no-sao","禁用SAO","bool","codec",nullptr,nullptr,"禁用样点自适应补偿",0,0,0,{}},
+                {"no-strong-intra-smoothing","禁用强帧内平滑","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"no-deblock","禁用去块","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+            };
+            section_maps["libx265"]["advanced"] = {};
+        }
+
+        // ======== libvpx-vp9 ========
+        {
+            section_maps["libvpx-vp9"]["general"] = {
+                {"gop_size","关键帧间隔","int","general",nullptr,nullptr,nullptr,0,300,0,{}},
+                {"b_frames","B帧数量","int","general",nullptr,nullptr,nullptr,0,16,-1,{}},
+                {"qmin","最小QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"qmax","最大QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"level","编码级别","select","general",nullptr,nullptr,nullptr,0,0,-1,
+                 {"3.0","3.1","4.0","4.1","4.2","5.0","5.1","5.2","6.0","6.1","6.2"}},
+            };
+            section_maps["libvpx-vp9"]["codec"] = {
+                {"cpu-used","速度/质量","int","codec",nullptr,nullptr,nullptr,-8,8,1,{}},
+                {"row-mt","行多线程","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"tile-columns","Tile列","int","codec",nullptr,nullptr,nullptr,-1,6,-1,{}},
+                {"tile-rows","Tile行","int","codec",nullptr,nullptr,nullptr,-1,2,-1,{}},
+                {"frame-parallel","帧并行","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"aq-mode","AQ模式","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"none","variance","complexity","cyclic","equator360"}},
+                {"auto-alt-ref","交替参考帧","int","codec",nullptr,nullptr,nullptr,-1,6,-1,{}},
+                {"lag-in-frames","前瞻帧数","int","codec",nullptr,nullptr,nullptr,-1,25,-1,{}},
+                {"arnr-maxframes","降噪帧数","int","codec",nullptr,nullptr,nullptr,-1,15,-1,{}},
+                {"arnr-strength","降噪强度","int","codec",nullptr,nullptr,nullptr,-1,6,-1,{}},
+                {"static-thresh","静态阈值","int","codec",nullptr,nullptr,nullptr,0,2147483647,0,{}},
+                {"drop-threshold","丢弃阈值","int","codec",nullptr,nullptr,nullptr,0,2147483647,-1,{}},
+                {"noise-sensitivity","噪声敏感度","int","codec",nullptr,nullptr,nullptr,0,4,0,{}},
+                {"sharpness","锐度","int","codec",nullptr,nullptr,nullptr,-1,7,-1,{}},
+                {"lossless","无损模式","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"tune-content","内容类型","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"default","screen","film"}},
+                {"enable-tpl","时域依赖模型","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"min-gf-interval","最小GF间隔","int","codec",nullptr,nullptr,nullptr,-1,2147483647,-1,{}},
+            };
+            section_maps["libvpx-vp9"]["advanced"] = {};
+        }
+
+        // ======== libaom-av1 ========
+        {
+            section_maps["libaom-av1"]["general"] = {
+                {"gop_size","关键帧间隔","int","general",nullptr,nullptr,nullptr,0,300,0,{}},
+                {"b_frames","B帧数量","int","general",nullptr,nullptr,nullptr,0,16,-1,{}},
+                {"qmin","最小QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"qmax","最大QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"level","编码级别","select","general",nullptr,nullptr,nullptr,0,0,-1,
+                 {"3.0","3.1","4.0","4.1","4.2","5.0","5.1","5.2","6.0","6.1","6.2"}},
+            };
+            section_maps["libaom-av1"]["codec"] = {
+                {"cpu-used","速度/质量","int","codec",nullptr,nullptr,nullptr,0,8,1,{}},
+                {"usage","用途","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"good","realtime","allintra"}},
+                {"row-mt","行多线程","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"tile-columns","Tile列","int","codec",nullptr,nullptr,nullptr,-1,6,-1,{}},
+                {"tile-rows","Tile行","int","codec",nullptr,nullptr,nullptr,-1,6,-1,{}},
+                {"aq-mode","AQ模式","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"none","variance","complexity","cyclic"}},
+                {"auto-alt-ref","交替参考帧","int","codec",nullptr,nullptr,nullptr,-1,2,-1,{}},
+                {"lag-in-frames","前瞻帧数","int","codec",nullptr,nullptr,nullptr,-1,66,-1,{}},
+                {"arnr-max-frames","降噪帧数","int","codec",nullptr,nullptr,nullptr,-1,15,-1,{}},
+                {"arnr-strength","降噪强度","int","codec",nullptr,nullptr,nullptr,-1,6,-1,{}},
+                {"static-thresh","静态阈值","int","codec",nullptr,nullptr,nullptr,0,2147483647,0,{}},
+                {"denoise-noise-level","降噪级别","int","codec",nullptr,nullptr,nullptr,-1,2147483647,-1,{}},
+                {"enable-cdef","CDEF滤波","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"enable-restoration","环路恢复","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"enable-global-motion","全局运动","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"enable-intrabc","帧内块复制","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"still-picture","静态图片","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"frame-parallel","帧并行","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+            };
+            section_maps["libaom-av1"]["advanced"] = {};
+        }
+
+        // ======== libsvtav1 (limited AVOptions) ========
+        {
+            section_maps["libsvtav1"]["general"] = {
+                {"gop_size","关键帧间隔","int","general",nullptr,nullptr,nullptr,0,300,0,{}},
+                {"b_frames","B帧数量","int","general",nullptr,nullptr,nullptr,0,16,-1,{}},
+                {"qmin","最小QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"qmax","最大QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"level","编码级别","select","general",nullptr,nullptr,nullptr,0,0,-1,
+                 {"3.0","3.1","4.0","4.1","4.2","5.0","5.1","5.2","6.0","6.1","6.2"}},
+            };
+            section_maps["libsvtav1"]["codec"] = {};
+            section_maps["libsvtav1"]["advanced"] = {};
+        }
+
+        // ======== h264_nvenc / hevc_nvenc ========
+        for (auto& s : {"h264_nvenc","hevc_nvenc"}) {
+            section_maps[s]["general"] = {
+                {"gop_size","关键帧间隔","int","general",nullptr,nullptr,nullptr,0,300,0,{}},
+                {"b_frames","B帧数量","int","general",nullptr,nullptr,nullptr,0,5,-1,{}},
+                {"qmin","最小QP","int","general","rate_control","constqp",nullptr,0,51,-1,{}},
+                {"qmax","最大QP","int","general","rate_control","constqp",nullptr,0,51,-1,{}},
+                {"level","编码级别","select","general",nullptr,nullptr,nullptr,0,0,-1,
+                 {"4.0","4.1","4.2","5.0","5.1","5.2","6.0","6.1","6.2"}},
+            };
+            section_maps[s]["codec"] = {
+                {"aq-strength","AQ强度","int","codec",nullptr,nullptr,"空间AQ强度",1,15,8,{}},
+                {"spatial-aq","空间AQ","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"temporal-aq","时域AQ","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"rc-lookahead","前瞻帧数","int","codec",nullptr,nullptr,nullptr,0,32,0,{}},
+                {"b_adapt","自适应B帧","bool","codec",nullptr,nullptr,nullptr,0,0,1,{}},
+                {"coder","熵编码","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"default","cabac","cavlc"}},
+                {"b_ref_mode","B帧参考","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"disabled","each","middle"}},
+                {"no-scenecut","禁用场景检测","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"strict_gop","严格GOP","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"zerolatency","零延迟","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"weighted_pred","加权预测","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"multipass","多Pass编码","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"disabled","qres","fullres"}},
+                {"cq","恒定质量值","float","codec","rate_control","vbr",nullptr,0,0,0,{}},
+                {"qp","固定QP值","int","codec","rate_control","constqp",nullptr,-1,51,-1,{}},
+                {"forced-idr","强制IDR","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"aud","访问单元分隔符","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+            };
+            section_maps[s]["advanced"] = {};
+        }
+
+        // ======== h264_qsv / hevc_qsv ========
+        for (auto& s : {"h264_qsv","hevc_qsv"}) {
+            section_maps[s]["general"] = {
+                {"gop_size","关键帧间隔","int","general",nullptr,nullptr,nullptr,0,300,0,{}},
+                {"b_frames","B帧数量","int","general",nullptr,nullptr,nullptr,0,5,-1,{}},
+                {"qmin","最小QP","int","general","rate_control","cqp",nullptr,0,51,-1,{}},
+                {"qmax","最大QP","int","general","rate_control","cqp",nullptr,0,51,-1,{}},
+                {"global_quality","ICQ 质量","int","general","rate_control","icq","Intelligent Constant Quality",0,51,-1,{}},
+                {"level","编码级别","select","general",nullptr,nullptr,nullptr,0,0,-1,
+                 {"4.0","4.1","4.2","5.0","5.1","5.2","6.0","6.1","6.2"}},
+            };
+            section_maps[s]["codec"] = {
+                {"rdo","率失真优化","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"-1=auto","0=off","1=on"}},
+                {"adaptive_i","自适应I帧","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"-1=auto","0=off","1=on"}},
+                {"adaptive_b","自适应B帧","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"-1=auto","0=off","1=on"}},
+                {"look_ahead","前瞻","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"look_ahead_depth","前瞻深度","int","codec","rate_control","la","LA: Look Ahead VBR",0,100,0,{}},
+                {"avbr_accuracy","AVBR精度","int","codec","rate_control","avbr","单位1/10%",0,65535,0,{}},
+                {"avbr_convergence","AVBR收敛","int","codec","rate_control","avbr","单位100帧",0,65535,0,{}},
+                {"int_ref_type","帧内刷新类型","select","codec",nullptr,nullptr,"B帧须设为0",0,0,-1,
+                 {"none","vertical","horizontal","slice"}},
+                {"scenario","编码场景","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"unknown","displayremoting","videoconference","archive","livestreaming","cameracapture","videosurveillance","gamestreaming","remotegaming"}},
+                {"forced-idr","强制IDR","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"aud","访问单元分隔符","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+            };
+            section_maps[s]["advanced"] = {};
+        }
+        // h264_qsv 独有的 cavlc
+        section_maps["h264_qsv"]["codec"].push_back(
+            {"cavlc","CAVLC","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}});
+
+        // ======== h264_amf ========
+        {
+            section_maps["h264_amf"]["general"] = {
+                {"gop_size","关键帧间隔","int","general",nullptr,nullptr,nullptr,0,300,0,{}},
+                {"b_frames","B帧数量","int","general",nullptr,nullptr,nullptr,0,5,-1,{}},
+                {"qmin","最小QP","int","general","rate_control","cqp",nullptr,0,51,-1,{}},
+                {"qmax","最大QP","int","general","rate_control","cqp",nullptr,0,51,-1,{}},
+                {"level","编码级别","select","general",nullptr,nullptr,nullptr,0,0,-1,
+                 {"4.0","4.1","4.2","5.0","5.1","5.2","6.0","6.1","6.2"}},
+            };
+            section_maps["h264_amf"]["codec"] = {
+                {"qvbr_quality_level","QVBR质量级别","int","codec","rate_control","qvbr",nullptr,-1,51,-1,{}},
+                {"forced-idr","强制IDR","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"aud","访问单元分隔符","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"me_half_pixel","半像素运动估计","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"me_quarter_pixel","四分之一像素运动估计","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+            };
+            section_maps["h264_amf"]["advanced"] = {};
+        }
+
+        // ======== hevc_amf ========
+        {
+            section_maps["hevc_amf"]["general"] = {
+                {"gop_size","关键帧间隔","int","general",nullptr,nullptr,nullptr,0,300,0,{}},
+                {"b_frames","B帧数量","int","general",nullptr,nullptr,nullptr,0,5,-1,{}},
+                {"qmin","最小QP","int","general","rate_control","cqp",nullptr,0,51,-1,{}},
+                {"qmax","最大QP","int","general","rate_control","cqp",nullptr,0,51,-1,{}},
+                {"level","编码级别","select","general",nullptr,nullptr,nullptr,0,0,-1,
+                 {"4.0","4.1","4.2","5.0","5.1","5.2","6.0","6.1","6.2"}},
+            };
+            section_maps["hevc_amf"]["codec"] = {
+                {"qvbr_quality_level","QVBR质量级别","int","codec","rate_control","qvbr",nullptr,-1,51,-1,{}},
+                {"forced-idr","强制IDR","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"me_half_pixel","半像素运动估计","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"me_quarter_pixel","四分之一像素运动估计","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+            };
+            section_maps["hevc_amf"]["advanced"] = {};
+        }
+
+        // ======== mpeg4 ========
+        {
+            section_maps["mpeg4"]["general"] = {
+                {"gop_size","关键帧间隔","int","general",nullptr,nullptr,nullptr,0,300,0,{}},
+                {"b_frames","B帧数量","int","general",nullptr,nullptr,nullptr,0,16,-1,{}},
+                {"qmin","最小QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"qmax","最大QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"level","编码级别","select","general",nullptr,nullptr,nullptr,0,0,-1,
+                 {"3.0","3.1","4.0","4.1","4.2","5.0","5.1","5.2","6.0","6.1","6.2"}},
+            };
+            section_maps["mpeg4"]["codec"] = {
+                {"mpeg_quant","MPEG量化","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"b_strategy","B帧策略","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"0","1","2"}},
+                {"sc_threshold","场景检测阈值","int","codec",nullptr,nullptr,nullptr,0,2147483647,0,{}},
+                {"skip_threshold","跳帧阈值","int","codec",nullptr,nullptr,nullptr,0,2147483647,0,{}},
+            };
+            section_maps["mpeg4"]["advanced"] = {};
+        }
+
+        // ======== libxvid ========
+        {
+            section_maps["libxvid"]["general"] = {
+                {"gop_size","关键帧间隔","int","general",nullptr,nullptr,nullptr,0,300,0,{}},
+                {"b_frames","B帧数量","int","general",nullptr,nullptr,nullptr,0,16,-1,{}},
+                {"qmin","最小QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"qmax","最大QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"level","编码级别","select","general",nullptr,nullptr,nullptr,0,0,-1,
+                 {"3.0","3.1","4.0","4.1","4.2","5.0","5.1","5.2","6.0","6.1","6.2"}},
+            };
+            section_maps["libxvid"]["codec"] = {
+                {"lumi_aq","亮度AQ","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"variance_aq","方差AQ","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"gmc","全局运动补偿","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"me_quality","运动估计质量","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"0","1","2","3","4","5","6"}},
+                {"mpeg_quant","MPEG量化","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+            };
+            section_maps["libxvid"]["advanced"] = {};
+        }
+
+        // ======== mjpeg (limited) ========
+        {
+            section_maps["mjpeg"]["general"] = {
+                {"gop_size","关键帧间隔","int","general",nullptr,nullptr,nullptr,0,300,0,{}},
+                {"b_frames","B帧数量","int","general",nullptr,nullptr,nullptr,0,16,-1,{}},
+                {"qmin","最小QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+                {"qmax","最大QP","int","general","rate_control","crf",nullptr,0,63,-1,{}},
+            };
+            section_maps["mjpeg"]["codec"] = {};
+            section_maps["mjpeg"]["advanced"] = {};
+        }
+
+        // ================================================================
+        // 编码器 profiles 保持不变
+        // ================================================================
         std::map<std::string, EncoderProfile> profiles;
 
         // ---- H.264 系列 ----
         profiles["libx264"] = {
-            {"crf","abr","cbr","vbr"},
+            {"crf","cqp","abr","cbr","vbr"},
             {"ultrafast","superfast","veryfast","faster","fast","medium",
              "slow","slower","veryslow","placebo"},
             {"film","animation","grain","stillimage","fastdecode","zerolatency"},
@@ -623,7 +965,7 @@ void MediaGoServer::register_routes() {
             {"yuv420p","yuv422p","yuv444p","yuv420p10le","yuv422p10le","yuv444p10le"}
         };
         profiles["libx264rgb"] = {
-            {"crf","abr","cbr","vbr"},
+            {"crf","cqp","abr","cbr","vbr"},
             {"ultrafast","superfast","veryfast","faster","fast","medium",
              "slow","slower","veryslow","placebo"},
             {},
@@ -631,21 +973,21 @@ void MediaGoServer::register_routes() {
             {"rgb24","bgr0"}
         };
         profiles["h264_amf"] = {
-            {"cqp","cbr","vbr"},
+            {"cqp","cbr","vbr_peak","vbr_latency","qvbr","hqvbr","hqcbr"},
             {"speed","balanced","quality"},
             {},
             {"main","high"},
             {"nv12","yuv420p"}
         };
         profiles["h264_nvenc"] = {
-            {"cqp","cbr","vbr"},
+            {"constqp","cbr","vbr","cbr_hq","vbr_hq","cbr_ld_hq"},
             {"p1","p2","p3","p4","p5","p6","p7"},
             {"hq","ll","ull","lossless"},
             {"baseline","main","high","high444p"},
             {"yuv420p","yuv444p","p010le"}
         };
         profiles["h264_qsv"] = {
-            {"cqp","cbr","vbr"},
+            {"cqp","cbr","vbr","avbr","icq","la"},
             {"veryfast","faster","fast","medium","slow","veryslow"},
             {},
             {"baseline","main","high"},
@@ -654,7 +996,7 @@ void MediaGoServer::register_routes() {
 
         // ---- H.265 / HEVC 系列 ----
         profiles["libx265"] = {
-            {"crf","abr","cbr","vbr"},
+            {"crf","cqp","abr","cbr","vbr"},
             {"ultrafast","superfast","veryfast","faster","fast","medium",
              "slow","slower","veryslow","placebo"},
             {"psnr","ssim","grain","fastdecode","zerolatency"},
@@ -662,21 +1004,21 @@ void MediaGoServer::register_routes() {
             {"yuv420p","yuv422p","yuv444p","yuv420p10le","yuv422p10le","yuv444p10le","yuv420p12le","yuv422p12le","yuv444p12le"}
         };
         profiles["hevc_amf"] = {
-            {"cqp","cbr","vbr"},
+            {"cqp","cbr","vbr_peak","vbr_latency","qvbr","hqvbr","hqcbr"},
             {"speed","balanced","quality"},
             {},
             {"main"},
             {"nv12","yuv420p"}
         };
         profiles["hevc_nvenc"] = {
-            {"cqp","cbr","vbr"},
+            {"constqp","cbr","vbr","cbr_hq","vbr_hq","cbr_ld_hq"},
             {"p1","p2","p3","p4","p5","p6","p7"},
             {"hq","ll","ull","lossless"},
             {"main","main10","rext"},
             {"yuv420p","yuv444p","p010le","p016le"}
         };
         profiles["hevc_qsv"] = {
-            {"cqp","cbr","vbr"},
+            {"cqp","cbr","vbr","avbr","icq","la"},
             {"veryfast","faster","fast","medium","slow","veryslow"},
             {},
             {"main","main10","mainsp"},
@@ -685,7 +1027,7 @@ void MediaGoServer::register_routes() {
 
         // ---- VP9 ----
         profiles["libvpx-vp9"] = {
-            {"crf","abr","cbr","vbr"},
+            {"crf","cbr","abr"},
             {"0","1","2","3","4","5","6"},
             {},
             {"0","1","2","3"},
@@ -694,14 +1036,14 @@ void MediaGoServer::register_routes() {
 
         // ---- AV1 ----
         profiles["libaom-av1"] = {
-            {"crf","abr","cbr","vbr"},
+            {"crf","cbr","abr"},
             {"0","1","2","3","4","5","6","7","8","9"},
             {},
             {"0","1","2"},
             {"yuv420p","yuv422p","yuv444p","yuv420p10le","yuv420p12le"}
         };
         profiles["libsvtav1"] = {
-            {"crf","abr","cbr","vbr"},
+            {"crf","cqp","abr"},
             {"0","1","2","3","4","5","6","7","8","9","10","11","12","13"},
             {},
             {"main","high","professional"},
@@ -710,29 +1052,32 @@ void MediaGoServer::register_routes() {
 
         // ---- MPEG ----
         profiles["mpeg4"] = {
-            {"abr","cbr"},
+            {"qscale","abr"},
             {},
             {},
             {"simple","advanced_simple"},
             {"yuv420p"}
         };
         profiles["libxvid"] = {
-            {"abr","cbr"},
+            {"abr"},
             {},
             {},
             {},
             {"yuv420p"}
         };
 
-        // ---- MJPEG ----
+        // ---- MJPEG（图片编码） ----
         profiles["mjpeg"] = {
-            {"abr"},
+            {"qscale"},
             {},
             {},
             {},
             {"yuvj420p","yuvj422p","yuvj444p"}
         };
 
+        // ================================================================
+        // 构建响应
+        // ================================================================
         auto it = profiles.find(codec);
         if (it != profiles.end()) {
             auto& p = it->second;
@@ -756,12 +1101,40 @@ void MediaGoServer::register_routes() {
             json px = json::array();
             for (auto& s : p.pixel_fmts) px.push_back(s);
             result["pixel_fmts"] = px;
+
+            // param_sections
+            json sections = json::array();
+            static const char* section_ids[] = {"general", "codec", "advanced"};
+            static const char* section_labels[] = {"通用编码参数", "编码器专有参数", "高级选项"};
+            static bool section_expanded[] = {true, true, false};
+
+            auto sm = section_maps.find(codec);
+            for (int si = 0; si < 3; si++) {
+                json sec;
+                sec["id"] = section_ids[si];
+                sec["label"] = section_labels[si];
+                sec["expanded"] = section_expanded[si];
+                json sp = json::array();
+                if (sm != section_maps.end()) {
+                    auto& sec_map = sm->second;
+                    auto sit = sec_map.find(section_ids[si]);
+                    if (sit != sec_map.end()) {
+                        for (auto& pd : sit->second) {
+                            sp.push_back(param_to_json(pd));
+                        }
+                    }
+                }
+                sec["params"] = sp;
+                sections.push_back(sec);
+            }
+            result["param_sections"] = sections;
         } else {
             result["rate_controls"] = json::array({"abr"});
             result["presets"] = json::array();
             result["tunes"] = json::array();
             result["profiles"] = json::array();
             result["pixel_fmts"] = json::array();
+            result["param_sections"] = json::array();
         }
 
         res.set_content(result.dump(), "application/json");
@@ -790,56 +1163,226 @@ void MediaGoServer::register_routes() {
         struct AudioProfile {
             std::vector<int> sample_rates;
             std::vector<const char*> channel_layouts;
-            bool has_quality;
-            bool has_bitrate;
+            std::vector<const char*> rate_controls;
         };
 
         std::map<std::string, AudioProfile> aprofiles;
         aprofiles["aac"] = {
             {8000,11025,12000,16000,22050,24000,32000,44100,48000,88200,96000},
             {"mono","stereo","5.1","7.1"},
-            true, true
+            {"cbr","vbr_quality"}
         };
         aprofiles["libfdk_aac"] = {
             {8000,11025,12000,16000,22050,24000,32000,44100,48000,88200,96000},
             {"mono","stereo","5.1","7.1"},
-            true, true
+            {"cbr","vbr_quality"}
         };
         aprofiles["libmp3lame"] = {
             {8000,11025,12000,16000,22050,24000,32000,44100,48000},
             {"mono","stereo","joint_stereo"},
-            false, true
+            {"cbr","abr","vbr_quality"}
         };
         aprofiles["flac"] = {
             {8000,16000,22050,24000,32000,44100,48000,88200,96000},
             {"mono","stereo","5.1","7.1"},
-            false, false
+            {}
         };
         aprofiles["libopus"] = {
             {8000,12000,16000,24000,48000},
             {"mono","stereo","5.1","7.1"},
-            false, true
+            {"cbr","vbr","constrained_vbr"}
         };
         aprofiles["ac3"] = {
             {32000,44100,48000},
             {"mono","stereo","5.1"},
-            false, true
+            {"cbr"}
         };
         aprofiles["libvorbis"] = {
             {8000,11025,16000,22050,44100,48000},
             {"mono","stereo","5.1"},
-            true, true
+            {"cbr","vbr_quality"}
         };
         aprofiles["pcm_s16le"] = {
             {8000,16000,22050,24000,32000,44100,48000,88200,96000},
             {"mono","stereo","5.1","7.1"},
-            false, false
+            {}
         };
         aprofiles["pcm_s24le"] = {
             {8000,16000,22050,24000,32000,44100,48000,88200,96000},
             {"mono","stereo","5.1","7.1"},
-            false, false
+            {}
         };
+
+        // 参数定义
+        struct ParamDef {
+            const char* name;
+            const char* label;
+            const char* type;
+            const char* section;
+            const char* when_field;
+            const char* when_value;
+            const char* desc;
+            int min_val, max_val, default_val;
+            std::vector<const char*> options;
+        };
+
+        auto param_to_json = [](const ParamDef& pd) {
+            json param = {
+                {"name",    pd.name},
+                {"label",   pd.label},
+                {"type",    pd.type},
+                {"min",     pd.min_val},
+                {"max",     pd.max_val},
+                {"default", pd.default_val},
+            };
+            if (pd.when_field) {
+                param["when_field"] = pd.when_field;
+                param["when_value"] = pd.when_value;
+            }
+            if (pd.desc) param["desc"] = pd.desc;
+            if (!pd.options.empty()) {
+                json opts = json::array();
+                for (auto& o : pd.options) opts.push_back(o);
+                param["options"] = opts;
+            }
+            return param;
+        };
+
+        // 音频编码器→分区→参数映射
+        std::map<std::string, std::map<std::string, std::vector<ParamDef>>> section_maps;
+
+        // ======== aac ========
+        {
+            section_maps["aac"]["general"] = {};
+            section_maps["aac"]["codec"] = {
+                {"aac_coder","编码算法","select","codec",nullptr,nullptr,"twoloop=质量优先, fast=快速",0,0,-1,
+                 {"twoloop","fast"}},
+                {"aac_ms","强制M/S立体声","bool","codec",nullptr,nullptr,"强制使用中/侧立体声编码",0,0,0,{}},
+                {"aac_is","强度立体声","bool","codec",nullptr,nullptr,"强度立体声编码,可降低码率",0,0,1,{}},
+                {"aac_pns","感知噪声替换","bool","codec",nullptr,nullptr,"用噪声替换感知不敏感的频段",0,0,1,{}},
+                {"aac_tns","时域噪声整形","bool","codec",nullptr,nullptr,"减少预回声伪影",0,0,1,{}},
+                {"aac_pce","强制PCE","bool","codec",nullptr,nullptr,"强制写入PCE(程序配置元素)",0,0,0,{}},
+            };
+            section_maps["aac"]["advanced"] = {};
+        }
+
+        // ======== libfdk_aac ========
+        {
+            section_maps["libfdk_aac"]["general"] = {};
+            section_maps["libfdk_aac"]["codec"] = {};
+            section_maps["libfdk_aac"]["advanced"] = {};
+        }
+
+        // ======== ac3 ========
+        {
+            section_maps["ac3"]["general"] = {};
+            section_maps["ac3"]["codec"] = {
+                {"dialnorm","对白电平(dB)","int","codec",nullptr,nullptr,"对白归一化电平,-31=无衰减",-31,-1,-31,{}},
+                {"stereo_rematrixing","立体声重矩阵","bool","codec",nullptr,nullptr,"启用立体声重矩阵,提升立体声编码效率",0,0,1,{}},
+                {"channel_coupling","声道耦合","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"auto","off","on"}},
+                {"room_type","房间类型","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"notindicated","large","small"}},
+                {"center_mixlev","中置混音电平","float","codec",nullptr,nullptr,"中置声道下混到立体声的电平",0,1,0,{}},
+                {"surround_mixlev","环绕混音电平","float","codec",nullptr,nullptr,"环绕声道下混到立体声的电平",0,1,0,{}},
+                {"dsur_mode","Dolby Surround模式","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"notindicated","on","off"}},
+            };
+            section_maps["ac3"]["advanced"] = {
+                {"mixing_level","混音电平","int","advanced",nullptr,nullptr,"房间声压级,SPL(dB)",-1,111,-1,{}},
+                {"per_frame_metadata","逐帧元数据","bool","advanced",nullptr,nullptr,"允许逐帧更改元数据",0,0,0,{}},
+                {"copyright","版权位","select","advanced",nullptr,nullptr,nullptr,0,0,-1,
+                 {"default","set","clear"}},
+                {"original","原始位流","select","advanced",nullptr,nullptr,nullptr,0,0,-1,
+                 {"default","set","clear"}},
+                {"dmix_mode","立体声下混模式","select","advanced",nullptr,nullptr,nullptr,0,0,-1,
+                 {"notindicated","ltrt","loro","dplii"}},
+                {"dsurex_mode","Dolby Surround EX","select","advanced",nullptr,nullptr,nullptr,0,0,-1,
+                 {"notindicated","on","off","dpliiz"}},
+                {"dheadphone_mode","Dolby Headphone","select","advanced",nullptr,nullptr,nullptr,0,0,-1,
+                 {"notindicated","on","off"}},
+                {"ad_conv_type","A/D转换器类型","select","advanced",nullptr,nullptr,nullptr,0,0,-1,
+                 {"standard","hdcd"}},
+                {"cpl_start_band","耦合起始频段","int","advanced",nullptr,nullptr,nullptr,-1,15,-1,{}},
+            };
+        }
+
+        // ======== flac ========
+        {
+            section_maps["flac"]["general"] = {
+                {"compression_level","FLAC 压缩级别","int","general",nullptr,nullptr,nullptr,0,12,-1,{}},
+            };
+            section_maps["flac"]["codec"] = {
+                {"lpc_type","LPC算法","select","codec",nullptr,nullptr,nullptr,0,0,-1,
+                 {"none","fixed","levinson","cholesky"}},
+                {"lpc_passes","LPC遍数","int","codec",nullptr,nullptr,"Cholesky分解的迭代次数",1,10,2,{}},
+                {"ch_mode","声道去相关","select","codec",nullptr,nullptr,"立体声去相关模式",0,0,-1,
+                 {"auto","indep","left_side","right_side","mid_side"}},
+            };
+            section_maps["flac"]["advanced"] = {
+                {"lpc_coeff_precision","LPC系数精度","int","advanced",nullptr,nullptr,nullptr,0,15,15,{}},
+                {"min_prediction_order","最小预测阶数","int","advanced",nullptr,nullptr,nullptr,-1,32,-1,{}},
+                {"max_prediction_order","最大预测阶数","int","advanced",nullptr,nullptr,nullptr,-1,32,-1,{}},
+                {"min_partition_order","最小分区阶数","int","advanced",nullptr,nullptr,nullptr,-1,8,-1,{}},
+                {"max_partition_order","最大分区阶数","int","advanced",nullptr,nullptr,nullptr,-1,8,-1,{}},
+                {"prediction_order_method","预测阶数方法","select","advanced",nullptr,nullptr,nullptr,0,0,-1,
+                 {"estimation","2level","4level","8level","search","log"}},
+                {"exact_rice_parameters","精确Rice参数","bool","advanced",nullptr,nullptr,"精确计算Rice参数,更高质量稍慢",0,0,0,{}},
+                {"multi_dim_quant","多维量化","bool","advanced",nullptr,nullptr,nullptr,0,0,0,{}},
+            };
+        }
+
+        // ======== libmp3lame ========
+        {
+            section_maps["libmp3lame"]["general"] = {
+                {"compression_level","MP3 压缩级别","int","general",nullptr,nullptr,nullptr,0,9,-1,{}},
+            };
+            section_maps["libmp3lame"]["codec"] = {
+                {"reservoir","比特储备","bool","codec",nullptr,nullptr,nullptr,0,0,1,{}},
+                {"joint_stereo","联合立体声","bool","codec",nullptr,nullptr,nullptr,0,0,1,{}},
+                {"abr","ABR模式","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"copyright","版权标记","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"original","原始标记","bool","codec",nullptr,nullptr,nullptr,0,0,1,{}},
+            };
+            section_maps["libmp3lame"]["advanced"] = {};
+        }
+
+        // ======== libopus ========
+        {
+            section_maps["libopus"]["general"] = {
+                {"compression_level","Opus 压缩级别","int","general",nullptr,nullptr,nullptr,0,10,-1,{}},
+                {"application","应用类型","select","general",nullptr,nullptr,nullptr,0,0,-1,
+                 {"voip","audio","lowdelay"}},
+                {"vbr","VBR模式","select","general",nullptr,nullptr,nullptr,0,0,-1,
+                 {"off","on","constrained"}},
+            };
+            section_maps["libopus"]["codec"] = {
+                {"frame_duration","帧时长","float","codec",nullptr,nullptr,nullptr,2,120,20,{}},
+                {"fec","前向纠错","bool","codec","packet_loss",">0",nullptr,0,0,0,{}},
+                {"packet_loss","预期丢包率","int","codec",nullptr,nullptr,nullptr,0,100,0,{}},
+                {"dtx","非连续传输","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
+                {"apply_phase_inv","相位反转","bool","codec",nullptr,nullptr,nullptr,0,0,1,{}},
+            };
+            section_maps["libopus"]["advanced"] = {};
+        }
+
+        // ======== libvorbis ========
+        {
+            section_maps["libvorbis"]["general"] = {
+                {"compression_level","Vorbis 压缩级别","int","general",nullptr,nullptr,nullptr,0,10,-1,{}},
+            };
+            section_maps["libvorbis"]["codec"] = {
+                {"iblock","脉冲块偏差","float","codec",nullptr,nullptr,nullptr,-15,0,0,{}},
+            };
+            section_maps["libvorbis"]["advanced"] = {};
+        }
+
+        // ======== pcm_s16le / pcm_s24le (no params) ========
+        for (auto& s : {"pcm_s16le","pcm_s24le"}) {
+            section_maps[s]["general"] = {};
+            section_maps[s]["codec"] = {};
+            section_maps[s]["advanced"] = {};
+        }
 
         auto it = aprofiles.find(codec);
         if (it != aprofiles.end()) {
@@ -853,13 +1396,45 @@ void MediaGoServer::register_routes() {
             for (auto& cl : p.channel_layouts) cls.push_back(cl);
             result["channel_layouts"] = cls;
 
-            result["has_quality"] = p.has_quality;
-            result["has_bitrate"] = p.has_bitrate;
+            result["has_quality"] = p.rate_controls.size() > 0;
+            result["has_bitrate"] = p.rate_controls.size() > 0;
+            json rcs = json::array();
+            for (auto& rc : p.rate_controls) rcs.push_back(rc);
+            result["rate_controls"] = rcs;
+
+            // param_sections
+            json sections = json::array();
+            static const char* section_ids[] = {"general", "codec", "advanced"};
+            static const char* section_labels[] = {"通用编码参数", "编码器专有参数", "高级选项"};
+            static bool section_expanded[] = {true, true, false};
+
+            auto sm = section_maps.find(codec);
+            for (int si = 0; si < 3; si++) {
+                json sec;
+                sec["id"] = section_ids[si];
+                sec["label"] = section_labels[si];
+                sec["expanded"] = section_expanded[si];
+                json sp = json::array();
+                if (sm != section_maps.end()) {
+                    auto& sec_map = sm->second;
+                    auto sit = sec_map.find(section_ids[si]);
+                    if (sit != sec_map.end()) {
+                        for (auto& pd : sit->second) {
+                            sp.push_back(param_to_json(pd));
+                        }
+                    }
+                }
+                sec["params"] = sp;
+                sections.push_back(sec);
+            }
+            result["param_sections"] = sections;
         } else {
             result["sample_rates"] = json::array({44100, 48000});
             result["channel_layouts"] = json::array({"stereo"});
             result["has_quality"] = false;
             result["has_bitrate"] = true;
+            result["rate_controls"] = json::array({"cbr"});
+            result["param_sections"] = json::array();
         }
 
         res.set_content(result.dump(), "application/json");
