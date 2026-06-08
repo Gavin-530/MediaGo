@@ -96,6 +96,7 @@ private:
                              const TranscodeConfig& cfg);
     bool build_video_filter(AVCodecContext* dec_ctx,
                              const TranscodeConfig& cfg,
+                             AVPixelFormat enc_pix_fmt,
                              AVFilterGraph** graph,
                              AVFilterContext** src,
                              AVFilterContext** sink);
@@ -373,7 +374,8 @@ bool TranscodeEngine::setup_streams(const TranscodeConfig& cfg) {
 
                 // 码率/CRF
                 if (cfg.video.crf >= 0) {
-                    av_opt_set_int(enc_ctx->priv_data, "crf", cfg.video.crf, 0);
+                    int r = av_opt_set_int(enc_ctx->priv_data, "crf", cfg.video.crf, 0);
+                    if (r < 0) fprintf(stderr, "  [warn] crf rejected: %s\n", av_strerr(r));
                 }
                 if (cfg.video.bitrate > 0) {
                     enc_ctx->bit_rate = cfg.video.bitrate;
@@ -387,13 +389,16 @@ bool TranscodeEngine::setup_streams(const TranscodeConfig& cfg) {
 
                 // 预设/调优
                 if (cfg.video.preset) {
-                    av_opt_set(enc_ctx->priv_data, "preset", cfg.video.preset, 0);
+                    int r = av_opt_set(enc_ctx->priv_data, "preset", cfg.video.preset, 0);
+                    if (r < 0) fprintf(stderr, "  [warn] preset '%s' rejected: %s\n", cfg.video.preset, av_strerr(r));
                 }
                 if (cfg.video.tune) {
-                    av_opt_set(enc_ctx->priv_data, "tune", cfg.video.tune, 0);
+                    int r = av_opt_set(enc_ctx->priv_data, "tune", cfg.video.tune, 0);
+                    if (r < 0) fprintf(stderr, "  [warn] tune '%s' rejected: %s\n", cfg.video.tune, av_strerr(r));
                 }
                 if (cfg.video.profile) {
-                    av_opt_set(enc_ctx->priv_data, "profile", cfg.video.profile, 0);
+                    int r = av_opt_set(enc_ctx->priv_data, "profile", cfg.video.profile, 0);
+                    if (r < 0) fprintf(stderr, "  [warn] profile '%s' rejected: %s\n", cfg.video.profile, av_strerr(r));
                 }
 
                 // 高级编码参数
@@ -407,7 +412,8 @@ bool TranscodeEngine::setup_streams(const TranscodeConfig& cfg) {
                     enc_ctx->qmax = cfg.video.qmax;
                 }
                 if (cfg.video.level) {
-                    av_opt_set(enc_ctx->priv_data, "level", cfg.video.level, 0);
+                    int r = av_opt_set(enc_ctx->priv_data, "level", cfg.video.level, 0);
+                    if (r < 0) fprintf(stderr, "  [warn] level '%s' rejected: %s\n", cfg.video.level, av_strerr(r));
                 }
 
                 // 编码器扩展参数（JSON → av_opt_set）
@@ -415,14 +421,19 @@ bool TranscodeEngine::setup_streams(const TranscodeConfig& cfg) {
                     try {
                         auto opts = nlohmann::json::parse(cfg.video.opts_json);
                         for (auto& [key, val] : opts.items()) {
+                            int ret = 0;
                             if (val.is_string()) {
-                                av_opt_set(enc_ctx->priv_data, key.c_str(), val.get<std::string>().c_str(), 0);
+                                ret = av_opt_set(enc_ctx->priv_data, key.c_str(), val.get<std::string>().c_str(), 0);
                             } else if (val.is_number_integer()) {
-                                av_opt_set_int(enc_ctx->priv_data, key.c_str(), val.get<int64_t>(), 0);
+                                ret = av_opt_set_int(enc_ctx->priv_data, key.c_str(), val.get<int64_t>(), 0);
                             } else if (val.is_number_float()) {
-                                av_opt_set_double(enc_ctx->priv_data, key.c_str(), val.get<double>(), 0);
+                                ret = av_opt_set_double(enc_ctx->priv_data, key.c_str(), val.get<double>(), 0);
                             } else if (val.is_boolean()) {
-                                av_opt_set_int(enc_ctx->priv_data, key.c_str(), val.get<bool>() ? 1 : 0, 0);
+                                ret = av_opt_set_int(enc_ctx->priv_data, key.c_str(), val.get<bool>() ? 1 : 0, 0);
+                            }
+                            if (ret < 0) {
+                                fprintf(stderr, "  [warn] video option '%s' rejected: %s\n",
+                                        key.c_str(), av_strerr(ret));
                             }
                         }
                     } catch (...) {
@@ -485,14 +496,19 @@ bool TranscodeEngine::setup_streams(const TranscodeConfig& cfg) {
                     try {
                         auto opts = nlohmann::json::parse(cfg.audio.opts_json);
                         for (auto& [key, val] : opts.items()) {
+                            int ret = 0;
                             if (val.is_string()) {
-                                av_opt_set(enc_ctx->priv_data, key.c_str(), val.get<std::string>().c_str(), 0);
+                                ret = av_opt_set(enc_ctx->priv_data, key.c_str(), val.get<std::string>().c_str(), 0);
                             } else if (val.is_number_integer()) {
-                                av_opt_set_int(enc_ctx->priv_data, key.c_str(), val.get<int64_t>(), 0);
+                                ret = av_opt_set_int(enc_ctx->priv_data, key.c_str(), val.get<int64_t>(), 0);
                             } else if (val.is_number_float()) {
-                                av_opt_set_double(enc_ctx->priv_data, key.c_str(), val.get<double>(), 0);
+                                ret = av_opt_set_double(enc_ctx->priv_data, key.c_str(), val.get<double>(), 0);
                             } else if (val.is_boolean()) {
-                                av_opt_set_int(enc_ctx->priv_data, key.c_str(), val.get<bool>() ? 1 : 0, 0);
+                                ret = av_opt_set_int(enc_ctx->priv_data, key.c_str(), val.get<bool>() ? 1 : 0, 0);
+                            }
+                            if (ret < 0) {
+                                fprintf(stderr, "  [warn] audio option '%s' rejected: %s\n",
+                                        key.c_str(), av_strerr(ret));
                             }
                         }
                     } catch (...) {
@@ -511,6 +527,11 @@ bool TranscodeEngine::setup_streams(const TranscodeConfig& cfg) {
                 enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
             }
 
+            // 支持实验性编码器 (如 truehd, dts, mlp, opus, avui, pdv 等)
+            if (enc->capabilities & AV_CODEC_CAP_EXPERIMENTAL) {
+                enc_ctx->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
+            }
+
             int ret = avcodec_open2(enc_ctx, enc, nullptr);
             if (ret < 0) {
                 fprintf(stderr, "  [error] open encoder '%s': %s\n", enc->name, av_strerr(ret));
@@ -523,20 +544,46 @@ bool TranscodeEngine::setup_streams(const TranscodeConfig& cfg) {
 
             ctx.enc_ctx = enc_ctx;
 
-            // 创建视频滤镜图
+            // 创建视频滤镜图 + 解码器
             if (type == AVMEDIA_TYPE_VIDEO) {
-                ctx.dec_ctx = avcodec_alloc_context3(
-                    avcodec_find_decoder(par->codec_id));
+                const AVCodec* dec = avcodec_find_decoder(par->codec_id);
+                ctx.dec_ctx = avcodec_alloc_context3(dec);
                 if (ctx.dec_ctx) {
                     avcodec_parameters_to_context(ctx.dec_ctx, par);
-                    avcodec_open2(ctx.dec_ctx,
-                                  avcodec_find_decoder(par->codec_id), nullptr);
+                    if (dec->capabilities & AV_CODEC_CAP_EXPERIMENTAL) {
+                        ctx.dec_ctx->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
+                    }
+                    int dret = avcodec_open2(ctx.dec_ctx, dec, nullptr);
+                    if (dret < 0) {
+                        fprintf(stderr, "  [warn] open decoder for stream #%u: %s, skipping encode\n",
+                                i, av_strerr(dret));
+                        avcodec_free_context(&ctx.dec_ctx);
+                    } else {
+                        if (!build_video_filter(ctx.dec_ctx, cfg,
+                                                enc_ctx->pix_fmt,
+                                                &ctx.filter_graph,
+                                                &ctx.buffer_src,
+                                                &ctx.buffer_sink)) {
+                            fprintf(stderr, "  [warn] filter build failed for stream #%u, direct encode\n", i);
+                        }
+                    }
+                }
+            }
 
-                    if (!build_video_filter(ctx.dec_ctx, cfg,
-                                            &ctx.filter_graph,
-                                            &ctx.buffer_src,
-                                            &ctx.buffer_sink)) {
-                        fprintf(stderr, "  [warn] filter build failed for stream #%u, direct encode\n", i);
+            // 音频编码也需创建解码器
+            if (type == AVMEDIA_TYPE_AUDIO) {
+                const AVCodec* dec = avcodec_find_decoder(par->codec_id);
+                ctx.dec_ctx = avcodec_alloc_context3(dec);
+                if (ctx.dec_ctx) {
+                    avcodec_parameters_to_context(ctx.dec_ctx, par);
+                    if (dec->capabilities & AV_CODEC_CAP_EXPERIMENTAL) {
+                        ctx.dec_ctx->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
+                    }
+                    int dret = avcodec_open2(ctx.dec_ctx, dec, nullptr);
+                    if (dret < 0) {
+                        fprintf(stderr, "  [warn] open audio decoder for stream #%u: %s, skipping encode\n",
+                                i, av_strerr(dret));
+                        avcodec_free_context(&ctx.dec_ctx);
                     }
                 }
             }
@@ -568,6 +615,7 @@ bool TranscodeEngine::setup_streams(const TranscodeConfig& cfg) {
 
 bool TranscodeEngine::build_video_filter(AVCodecContext* dec_ctx,
                                           const TranscodeConfig& cfg,
+                                          AVPixelFormat enc_pix_fmt,
                                           AVFilterGraph** graph,
                                           AVFilterContext** src,
                                           AVFilterContext** sink) {
@@ -641,6 +689,26 @@ bool TranscodeEngine::build_video_filter(AVCodecContext* dec_ctx,
                 fps_args, nullptr, *graph);
         if (ret >= 0 && avfilter_link(last, 0, fps_ctx, 0) >= 0) {
             last = fps_ctx;
+        }
+    }
+
+    // 像素格式转换（解码器输出 vs 编码器期望）
+    if (enc_pix_fmt != AV_PIX_FMT_NONE && enc_pix_fmt != dec_ctx->pix_fmt) {
+        const char* fmt_name = av_get_pix_fmt_name(enc_pix_fmt);
+        if (fmt_name) {
+            char format_args[64];
+            snprintf(format_args, sizeof(format_args), "format=%s", fmt_name);
+
+            AVFilterContext* format_ctx = nullptr;
+            ret = avfilter_graph_create_filter(&format_ctx,
+                    avfilter_get_by_name("format"), "format",
+                    format_args, nullptr, *graph);
+            if (ret >= 0 && avfilter_link(last, 0, format_ctx, 0) >= 0) {
+                last = format_ctx;
+            } else {
+                fprintf(stderr, "  [warn] cannot add format=%s filter: %s\n",
+                        fmt_name, av_strerr(ret));
+            }
         }
     }
 
@@ -846,7 +914,7 @@ bool TranscodeEngine::flush() {
             // 冲刷编码器
             avcodec_send_frame(ctx.enc_ctx, nullptr);
             while (avcodec_receive_packet(ctx.enc_ctx, out_pkt) >= 0) {
-                out_pkt->stream_index = stream_map_[out_pkt->stream_index];
+                out_pkt->stream_index = ctx.out_st->index;
                 av_packet_rescale_ts(out_pkt, ctx.enc_ctx->time_base,
                                      ctx.out_st->time_base);
                 av_interleaved_write_frame(out_fmt_, out_pkt);

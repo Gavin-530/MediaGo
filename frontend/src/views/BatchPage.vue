@@ -723,6 +723,7 @@ const config = reactive({
   audioBitrate: '',
   audioSampleRate: '' as string | number,
   audioChannelLayout: '',
+  audioQuality: 0,
   // 容器
   format: '',
   overwrite: false,
@@ -886,7 +887,7 @@ async function startBatch() {
           if (val !== '' && val !== undefined && val !== -1) {
             const paramDef = videoParams.value.find(p => p.name === key)
             if (paramDef?.type === 'bool') {
-              videoOpts[key] = val === 1 || val === '1' || val === true
+              videoOpts[key] = val === 1 || val === '1'
             } else if (typeof val === 'string') {
               videoOpts[key] = val
             } else {
@@ -911,7 +912,7 @@ async function startBatch() {
           if (val !== '' && val !== undefined && val !== -1) {
             const paramDef = audioParams.value.find(p => p.name === key)
             if (paramDef?.type === 'bool') {
-              audioOpts[key] = val === 1 || val === '1' || val === true
+              audioOpts[key] = val === 1 || val === '1'
             } else if (typeof val === 'string') {
               audioOpts[key] = val
             } else if (typeof val === 'boolean') {

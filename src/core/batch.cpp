@@ -275,28 +275,28 @@ static BatchJobItem parse_job_item(const json& j) {
 
     if (j.contains("video")) {
         auto& v = j["video"];
-        if (v.contains("copy") && v["copy"].is_boolean() && v["copy"].get<bool>()) {
+        if (v.contains("copy") && v.value("copy", false)) {
             item.video_copy = true;
         } else if (v.contains("codec")) {
-            item.video_codec = v["codec"].get<std::string>();
+            item.video_codec = v.value("codec", "");
         }
-        item.video_crf     = v.contains("crf") ? v["crf"].get<int>() : -1;
-        item.video_bitrate = v.contains("bitrate") ? v["bitrate"].get<int64_t>() : 0;
-        item.video_maxrate = v.contains("maxrate") ? v["maxrate"].get<int64_t>() : 0;
-        item.video_bufsize = v.contains("bufsize") ? v["bufsize"].get<int64_t>() : 0;
-        item.video_width   = v.contains("width") ? v["width"].get<int>() : 0;
-        item.video_height  = v.contains("height") ? v["height"].get<int>() : 0;
-        item.video_fps     = v.contains("fps") ? v["fps"].get<double>() : 0.0;
+        item.video_crf     = v.value("crf", -1);
+        item.video_bitrate = v.value("bitrate", (int64_t)0);
+        item.video_maxrate = v.value("maxrate", (int64_t)0);
+        item.video_bufsize = v.value("bufsize", (int64_t)0);
+        item.video_width   = v.value("width", 0);
+        item.video_height  = v.value("height", 0);
+        item.video_fps     = v.value("fps", 0.0);
         item.video_keep_aspect = v.value("keep_aspect", true);
         item.video_preset  = v.value("preset", "");
         item.video_tune    = v.value("tune", "");
         item.video_profile = v.value("profile", "");
         item.video_pixel_fmt = v.value("pixel_fmt", "");
-        item.video_gop_size  = v.contains("gop_size") ? v["gop_size"].get<int>() : 0;
-        item.video_threads   = v.contains("threads") ? v["threads"].get<int>() : 0;
-        item.video_b_frames  = v.contains("b_frames") ? v["b_frames"].get<int>() : -1;
-        item.video_qmin      = v.contains("qmin") ? v["qmin"].get<int>() : -1;
-        item.video_qmax      = v.contains("qmax") ? v["qmax"].get<int>() : -1;
+        item.video_gop_size  = v.value("gop_size", 0);
+        item.video_threads   = v.value("threads", 0);
+        item.video_b_frames  = v.value("b_frames", -1);
+        item.video_qmin      = v.value("qmin", -1);
+        item.video_qmax      = v.value("qmax", -1);
         item.video_level     = v.value("level", "");
         if (v.contains("opts") && v["opts"].is_object()) {
             item.video_opts_json = v["opts"].dump();
@@ -305,24 +305,24 @@ static BatchJobItem parse_job_item(const json& j) {
 
     if (j.contains("audio")) {
         auto& a = j["audio"];
-        if (a.contains("copy") && a["copy"].is_boolean() && a["copy"].get<bool>()) {
+        if (a.contains("copy") && a.value("copy", false)) {
             item.audio_copy = true;
         } else if (a.contains("codec")) {
-            item.audio_codec = a["codec"].get<std::string>();
+            item.audio_codec = a.value("codec", "");
         }
-        item.audio_bitrate = a.contains("bitrate") ? a["bitrate"].get<int64_t>() : 0;
-        item.audio_sample_rate = a.contains("sample_rate") ? a["sample_rate"].get<int>() : 0;
+        item.audio_bitrate = a.value("bitrate", (int64_t)0);
+        item.audio_sample_rate = a.value("sample_rate", 0);
         item.audio_channel_layout = a.value("channel_layout", "");
-        item.audio_compression_level = a.contains("compression_level") ? a["compression_level"].get<int>() : -1;
+        item.audio_compression_level = a.value("compression_level", -1);
         if (a.contains("opts") && a["opts"].is_object()) {
             item.audio_opts_json = a["opts"].dump();
         }
     }
 
     if (j.contains("format"))
-        item.format = j["format"].get<std::string>();
+        item.format = j.value("format", "");
     if (j.contains("overwrite"))
-        item.overwrite = j["overwrite"].get<bool>();
+        item.overwrite = j.value("overwrite", false);
 
     return item;
 }

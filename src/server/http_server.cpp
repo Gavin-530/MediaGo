@@ -836,11 +836,11 @@ void MediaGoServer::register_routes() {
             };
             section_maps[s]["codec"] = {
                 {"rdo","率失真优化","select","codec",nullptr,nullptr,nullptr,0,0,-1,
-                 {"-1=auto","0=off","1=on"}},
+                 {"-1","0","1"}},
                 {"adaptive_i","自适应I帧","select","codec",nullptr,nullptr,nullptr,0,0,-1,
-                 {"-1=auto","0=off","1=on"}},
+                 {"-1","0","1"}},
                 {"adaptive_b","自适应B帧","select","codec",nullptr,nullptr,nullptr,0,0,-1,
-                 {"-1=auto","0=off","1=on"}},
+                 {"-1","0","1"}},
                 {"look_ahead","前瞻","bool","codec",nullptr,nullptr,nullptr,0,0,0,{}},
                 {"look_ahead_depth","前瞻深度","int","codec","rate_control","la","LA: Look Ahead VBR",0,100,0,{}},
                 {"avbr_accuracy","AVBR精度","int","codec","rate_control","avbr","单位1/10%",0,65535,0,{}},
@@ -1129,12 +1129,37 @@ void MediaGoServer::register_routes() {
             }
             result["param_sections"] = sections;
         } else {
-            result["rate_controls"] = json::array({"abr"});
+            result["rate_controls"] = json::array({"cqp","vbr","cbr","qvbr","ICQ","LA","LA_ICQ","LA_HRD"});
             result["presets"] = json::array();
             result["tunes"] = json::array();
             result["profiles"] = json::array();
             result["pixel_fmts"] = json::array();
-            result["param_sections"] = json::array();
+            json sections = json::array();
+            {
+                json sec;
+                sec["id"] = "rate_control";
+                sec["label"] = "码率控制";
+                sec["expanded"] = true;
+                sec["params"] = json::array();
+                sections.push_back(sec);
+            }
+            {
+                json sec;
+                sec["id"] = "general";
+                sec["label"] = "通用编码参数";
+                sec["expanded"] = true;
+                std::vector<ParamDef> gparams = {
+                    {"gop_size","关键帧间隔","int","general",nullptr,nullptr,nullptr,0,300,0,{}},
+                    {"b_frames","B帧数量","int","general",nullptr,nullptr,nullptr,0,16,-1,{}},
+                    {"qmin","最小QP","int","general",nullptr,nullptr,nullptr,0,63,-1,{}},
+                    {"qmax","最大QP","int","general",nullptr,nullptr,nullptr,0,63,-1,{}},
+                };
+                json sp = json::array();
+                for (auto& pd : gparams) sp.push_back(param_to_json(pd));
+                sec["params"] = sp;
+                sections.push_back(sec);
+            }
+            result["param_sections"] = sections;
         }
 
         res.set_content(result.dump(), "application/json");
@@ -1429,12 +1454,26 @@ void MediaGoServer::register_routes() {
             }
             result["param_sections"] = sections;
         } else {
-            result["sample_rates"] = json::array({44100, 48000});
-            result["channel_layouts"] = json::array({"stereo"});
+            result["sample_rates"] = json::array({8000,11025,16000,22050,32000,44100,48000,88200,96000,176400,192000});
+            result["channel_layouts"] = json::array({"mono","stereo","2.1","3.0","3.1","4.0","4.1","5.0","5.1","6.1","7.1"});
             result["has_quality"] = false;
             result["has_bitrate"] = true;
-            result["rate_controls"] = json::array({"cbr"});
-            result["param_sections"] = json::array();
+            result["rate_controls"] = json::array({"cqp","vbr","cbr"});
+            json sections = json::array();
+            {
+                json sec;
+                sec["id"] = "general";
+                sec["label"] = "通用编码参数";
+                sec["expanded"] = true;
+                std::vector<ParamDef> gparams = {
+                    {"compression_level","压缩级别","int","general",nullptr,nullptr,nullptr,0,12,-1,{}},
+                };
+                json sp = json::array();
+                for (auto& pd : gparams) sp.push_back(param_to_json(pd));
+                sec["params"] = sp;
+                sections.push_back(sec);
+            }
+            result["param_sections"] = sections;
         }
 
         res.set_content(result.dump(), "application/json");

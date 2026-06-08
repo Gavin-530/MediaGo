@@ -11,7 +11,7 @@
 | **原生 FFmpeg** | 标准 `avformat → avcodec → avfilter → avcodec → avformat` 五阶段管线 |
 | **行业标准输出** | Lanczos 缩放、CRF 质量控制、色彩元数据完整传递 |
 | **单一路径** | 整个项目只有一条 TranscodeEngine 处理管线 |
-| **前后端分离** | C++ HTTP 服务层 + Vue 3 前端，大企业开发范式 |
+| **前后端分离** | C++ HTTP 服务层 + Vue 3 前端 |
 
 ## 架构
 
@@ -27,21 +27,21 @@
 │              cpp-httplib · REST · SSE 进度推送                  │
 │                    http://localhost:9527                        │
 ├─────────────────────────────────────────────────────────────────┤
-│  POST /api/upload             │  多文件上传，保存临时目录               │
-│  POST /api/batch              │  提交 JSON 清单，异步转码               │
-│  GET  /api/progress/:task_id  │  SSE 实时进度推送                      │
-│  GET  /api/probe              │  媒体属性探测                          │
-│  GET  /api/codecs             │  枚举可用编解码器                      │
-│  GET  /api/pixfmts            │  枚举可用像素格式                      │
-│  POST /api/encoder-params     │  按编码器查询私有参数（码率控制等）    │
-│  POST /api/audio-encoder-params│ 按音频编码器查询私有参数               │
-│  GET  /api/history            │  查询处理历史                          │
-│  POST /api/open-folder        │  打开资源管理器目录                    │
+│  POST /api/upload              │  多文件上传                      │
+│  POST /api/batch               │  提交 JSON 清单，异步转码        │
+│  GET  /api/progress/:task_id   │  SSE 实时进度推送               │
+│  GET  /api/probe               │  媒体属性探测                   │
+│  GET  /api/codecs              │  枚举可用编解码器               │
+│  GET  /api/pixfmts             │  枚举可用像素格式               │
+│  POST /api/encoder-params      │  查询视频编码器私有参数          │
+│  POST /api/audio-encoder-params│  查询音频编码器私有参数          │
+│  GET  /api/history             │  查询处理历史                   │
+│  POST /api/open-folder         │  打开资源管理器目录              │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────────┐
 │                     CLI (src/main.cpp)                          │
-│                                                                  │
+│                                                                 │
 │  convert ──→ transcode_run() ──→ TranscodeEngine                │
 │  batch   ──→ BatchProcessor ───────────┘                        │
 │  probe   ──→ media_probe()                                      │
@@ -83,23 +83,21 @@ MediaGo/
 │   ├── vite.config.ts                API 代理 /api → 127.0.0.1:9527
 │   ├── index.html
 │   └── src/
-│       ├── main.ts                   应用入口（Element Plus + Router）
+│       ├── main.ts                   应用入口
 │       ├── App.vue                   侧边栏布局 + 导航
 │       ├── router/index.ts           路由：/(批量) + /probe(探测)
-│       ├── api/index.ts              Axios API 封装
+│       ├── api/index.ts              API 封装
 │       ├── composables/useSSE.ts     EventSource SSE 进度流
 │       ├── components/
-│       │   ├── FileUploader.vue     拖拽上传 + 文件列表
-│       │   ├── ProgressPanel.vue    进度条 + SSE 实时更新
-│       │   └── ProbeResult.vue      媒体属性描述列表
-│       ├── views/
-│       │   ├── BatchPage.vue        批量处理主页面
-│       │   └── ProbePage.vue        媒体探测页面
-│       └── styles/
-│           └── main.css
+│       │   ├── FileUploader.vue      拖拽上传 + 文件列表
+│       │   ├── ProgressPanel.vue     进度条 + SSE 实时更新
+│       │   └── ProbeResult.vue       媒体属性展示
+│       └── views/
+│           ├── BatchPage.vue         批量处理主页面
+│           └── ProbePage.vue         媒体探测页面
 ├── devtools/                         开发工具（诊断程序，非发布产品）
 │   ├── CMakeLists.txt
-│   ├── diag.h / .cpp                 FFmpeg 版本/硬件编解码器/VMAF 检查
+│   ├── diag.h / .cpp                 FFmpeg 版本/硬件编解码器检查
 │   └── diag_main.cpp                 诊断程序入口
 ├── libs/
 │   ├── ffmpeg/                       FFmpeg 开发包（预编译，Windows MinGW）
@@ -202,19 +200,12 @@ MediaGo convert <input> <output> [options]
 |------|------|------|
 | `--vcodec` | `<name>` | 视频编码器，默认 copy |
 | `--acodec` | `<name>` | 音频编码器，默认 copy |
-| `--rate-control` | `<mode>` | 码率控制：crf / cqp / abr / cbr / vbr 等 |
 | `--crf` | `<0-51>` | CRF 质量控制 |
-| `--bitrate` | `<bps>` | 码率 |
-| `--maxrate` | `<bps>` | 最大码率 (VBV) |
-| `--bufsize` | `<bps>` | 缓冲大小 (VBV) |
-| `--min-qp` | `<q>` | 最小 QP |
-| `--max-qp` | `<q>` | 最大 QP |
+| `--bitrate` | `<bps>` | 目标码率 |
 | `--preset` | `<name>` | 编码器预设 |
-| `--tune` | `<name>` | 编码器调优 |
 | `--scale` | `<WxH>` | 缩放尺寸 |
 | `--fps` | `<rate>` | 目标帧率 |
 | `--format` | `<name>` | 输出容器格式 |
-| `--opts` | `<json>` | 编码器私有参数 JSON |
 | `--overwrite` | — | 覆盖已存在文件 |
 
 **示例：**
@@ -247,72 +238,47 @@ JSON 清单结构：
 ```json
 {
   "output": {
-    "dir": "./output",
+    "dir": "./data/output",
     "structure": "by_type"
   },
   "defaults": {
-    "video": {
-      "codec": null,
-      "rate_control": "crf",
-      "crf": 23,
-      "bitrate": 0,
-      "maxrate": 0,
-      "bufsize": 0,
-      "min_qp": -1,
-      "max_qp": -1,
-      "width": 0,
-      "height": 0,
-      "fps": 0.0,
-      "keep_aspect": true,
-      "preset": "",
-      "tune": "",
-      "opts_json": null
-    },
-    "audio": {
-      "codec": "",
-      "rate_control": "",
-      "bitrate": 0,
-      "quality": 0,
-      "opts_json": null
-    }
+    "overwrite": false
   },
   "jobs": [
     {
       "input": "*.mp4",
-      "output": null,
-      "overwrite": false,
-      "format": "",
       "video": {
-        "copy": false,
         "codec": "libx264",
-        "rate_control": "crf",
-        "crf": 18,
+        "crf": 23,
         "bitrate": 0,
-        "maxrate": 5000000,
-        "bufsize": 10000000,
-        "min_qp": 10,
-        "max_qp": 40,
+        "maxrate": 0,
+        "bufsize": 0,
         "width": 1920,
         "height": 1080,
         "fps": 24,
         "keep_aspect": true,
         "preset": "medium",
         "tune": "film",
-        "opts_json": null
+        "profile": "high",
+        "pixel_fmt": "yuv420p",
+        "gop_size": 0,
+        "threads": 0,
+        "b_frames": -1,
+        "qmin": -1,
+        "qmax": -1,
+        "level": "",
+        "opts": {}
       },
       "audio": {
-        "copy": false,
         "codec": "aac",
-        "rate_control": "cbr",
         "bitrate": 256000,
-        "quality": 0,
-        "opts_json": null
-      }
-    },
-    {
-      "input": "*.jpg",
-      "video": { "copy": true },
-      "audio": { "copy": true }
+        "sample_rate": 48000,
+        "channel_layout": "stereo",
+        "compression_level": -1,
+        "opts": {}
+      },
+      "format": "mp4",
+      "overwrite": false
     }
   ]
 }
@@ -331,29 +297,35 @@ JSON 清单结构：
 |------|------|------|
 | `input` | string | 文件路径，支持 `*` 和 `?` 通配符 |
 | `output` | string | 可选输出路径（相对 `dir` 或绝对路径） |
-| `format` | string | 输出容器格式 |
+| `format` | string | 输出容器格式（如 "mp4", "mkv", "mov"） |
 | `overwrite` | bool | 覆盖已存在文件 |
-| `video.copy` | bool | `true` = 视频流拷贝 |
-| `video.codec` | string | 视频编码器 |
-| `video.rate_control` | string | 码率控制模式：crf / cqp / abr / cbr / vbr / constqp 等 |
-| `video.crf` | int | CRF 质量控制 |
-| `video.bitrate` | int | 视频码率 |
-| `video.maxrate` | int | 最大码率 (VBV) |
-| `video.bufsize` | int | 缓冲大小 (VBV) |
-| `video.min_qp` | double | 最小 QP |
-| `video.max_qp` | double | 最大 QP |
-| `video.width` / `height` | int | 缩放尺寸 |
-| `video.fps` | double | 目标帧率 |
+| `video.codec` | string | 视频编码器，不填或 "copy" = 流拷贝 |
+| `video.copy` | bool | `true` = 视频流拷贝（与 codec 互斥） |
+| `video.crf` | int | CRF 质量控制（-1 = 编码器默认） |
+| `video.bitrate` | int64 | 视频码率 |
+| `video.maxrate` | int64 | 最大码率 (VBV) |
+| `video.bufsize` | int64 | 缓冲大小 (VBV) |
+| `video.width` / `height` | int | 缩放尺寸（0 = 保持原始） |
+| `video.fps` | double | 目标帧率（0 = 保持原始） |
 | `video.keep_aspect` | bool | 保持宽高比（默认 true） |
 | `video.preset` | string | 编码器预设 |
 | `video.tune` | string | 编码器调优 |
-| `video.opts_json` | string | 编码器私有参数 JSON（av_opt_set） |
-| `audio.copy` | bool | `true` = 音频流拷贝 |
-| `audio.codec` | string | 音频编码器 |
-| `audio.rate_control` | string | 码率控制模式：cbr / abr / vbr / vbr_quality 等 |
-| `audio.bitrate` | int | 音频码率 |
-| `audio.quality` | double | 音频质量参数 |
-| `audio.opts_json` | string | 编码器私有参数 JSON（av_opt_set） |
+| `video.profile` | string | 编码器 profile |
+| `video.pixel_fmt` | string | 像素格式 |
+| `video.gop_size` | int | 关键帧间隔（0 = 编码器默认） |
+| `video.threads` | int | 编码线程数（0 = 自动） |
+| `video.b_frames` | int | B帧最大连续数（-1 = 编码器默认） |
+| `video.qmin` | int | 最小量化器（-1 = 编码器默认） |
+| `video.qmax` | int | 最大量化器（-1 = 编码器默认） |
+| `video.level` | string | 编码级别（"" = 自动） |
+| `video.opts` | object | 编码器私有参数，JSON 对象，通过 `av_opt_set` 注入 |
+| `audio.codec` | string | 音频编码器，不填或 "copy" = 流拷贝 |
+| `audio.copy` | bool | `true` = 音频流拷贝（与 codec 互斥） |
+| `audio.bitrate` | int64 | 音频码率 |
+| `audio.sample_rate` | int | 采样率（0 = 保持原始） |
+| `audio.channel_layout` | string | 声道布局（"" = 保持原始） |
+| `audio.compression_level` | int | 压缩级别（-1 = 编码器默认） |
+| `audio.opts` | object | 音频编码器私有参数，通过 `av_opt_set` 注入 |
 
 #### probe — 源文件属性探测
 
@@ -399,8 +371,8 @@ MediaGo pixfmts
 | `POST` | `/api/upload` | 多文件上传（multipart/form-data） |
 | `POST` | `/api/batch` | 提交批量转码（JSON 清单） |
 | `GET` | `/api/progress/:task_id` | SSE 实时进度推送 |
-| `POST` | `/api/encoder-params` | 查询编码器专属参数 `{"codec":"libx264"}` |
-| `POST` | `/api/audio-encoder-params` | 查询音频编码器参数 `{"codec":"aac"}` |
+| `POST` | `/api/encoder-params` | 查询视频编码器私有参数 `{"codec":"libx264"}` |
+| `POST` | `/api/audio-encoder-params` | 查询音频编码器私有参数 `{"codec":"aac"}` |
 | `GET` | `/api/history` | 处理历史记录 |
 | `POST` | `/api/open-folder` | 打开资源管理器目录 `{"dir":"path"}` |
 
@@ -428,18 +400,18 @@ curl -X POST http://127.0.0.1:9527/api/audio-encoder-params -H "Content-Type: ap
 
 ### GUI 页面
 
-| 页面 | 路径 | 功能 |
+| 页面 | 路由 | 功能 |
 |------|------|------|
-| 批量处理 | `/` | 拖拽上传 → 配置编码参数（基础处理 + 高级选项） → 异步转码 → SSE 实时进度 |
+| 批量处理 | `/` | 拖拽上传 → 配置编码参数 → 异步转码 → SSE 实时进度 |
 | 媒体探测 | `/probe` | 输入路径 → 查看编解码器、分辨率、颜色空间等属性 |
 
 批量处理页面支持：
 
-- **视频编码**：选择编码器后自动拉取该编码器支持的码率控制模式（CRF/CQP/ABR/CBR/VBR 等），按编码器真实支持罗列
-- **基础处理**：缩放 / 帧率 / 像素格式 / GOP 等编码器无关参数，始终可见
-- **高级选项**（折叠）：线程数 + 编码器专属参数（profile / level / bframes 等 FFmpeg 原生参数）
-- **音频编码**：独立码率控制（CBR/ABR/VBR/VBR-Quality 等），按编码器区分
-- **图片编码**：mjpeg / libwebp 等图片编码器独立于视频列表展示
+- **视频编码**：选择编码器后自动拉取该编码器支持的码率控制模式（CRF/CQP/ABR/CBR/VBR 等）
+- **基础参数**：缩放 / 帧率 / 像素格式 / GOP 等编码器无关参数
+- **高级选项**（折叠）：profile / level / b_frames 等编码器专属参数
+- **音频编码**：独立配置编码器、码率、采样率、声道布局
+- **处理进度**：SSE 实时推送，当前文件、成功/失败计数一目了然
 
 ## 核心 API
 
@@ -447,35 +419,36 @@ curl -X POST http://127.0.0.1:9527/api/audio-encoder-params -H "Content-Type: ap
 
 ```cpp
 struct VideoConfig {
-    const char* codec = nullptr;   // nullptr 或 "copy" = 流拷贝
-    const char* rate_control = nullptr; // crf / cqp / abr / cbr / vbr / constqp 等
-    int crf = -1;                  // CRF (-1 = 编码器默认)
-    int64_t bitrate = 0;           // 码率
-    int64_t maxrate = 0;           // 最大码率 (VBV)
-    int64_t bufsize = 0;           // 缓冲大小 (VBV)
-    double min_qp = -1;            // 最小 QP (-1 = 默认)
-    double max_qp = -1;            // 最大 QP (-1 = 默认)
-    const char* preset = nullptr;  // 编码器预设
-    const char* tune = nullptr;    // 编码器调优
-    int width = 0;                 // 缩放宽度 (0 = 原始)
-    int height = 0;                // 缩放高度 (0 = 原始)
-    bool keep_aspect = true;       // 保持宽高比
-    double fps = 0.0;              // 帧率 (0.0 = 原始)
-    const char* pixel_fmt = nullptr;
-    int gop_size = 0;
-    int threads = 0;
-    const char* filters = nullptr; // 自定义 FFmpeg 滤镜图
-    const char* opts_json = nullptr; // 编码器私有参数 JSON（av_opt_set）
+    const char* codec = nullptr;      // nullptr 或 "copy" = 流拷贝
+    int crf = -1;                     // CRF (-1 = 编码器默认)
+    int64_t bitrate = 0;              // 码率
+    int64_t maxrate = 0;              // 最大码率 (VBV)
+    int64_t bufsize = 0;              // 缓冲大小 (VBV)
+    const char* preset = nullptr;     // 编码器预设
+    const char* tune = nullptr;       // 编码器调优
+    const char* profile = nullptr;    // 编码器 profile
+    int width = 0;                    // 缩放宽度 (0 = 原始)
+    int height = 0;                   // 缩放高度 (0 = 原始)
+    bool keep_aspect = true;          // 保持宽高比
+    double fps = 0.0;                 // 帧率 (0.0 = 原始)
+    const char* pixel_fmt = nullptr;  // 像素格式
+    int gop_size = 0;                 // 关键帧间隔
+    int threads = 0;                  // 编码线程数
+    const char* filters = nullptr;    // 自定义 FFmpeg 滤镜图
+    int b_frames = -1;                // B帧最大连续数
+    int qmin = -1;                    // 最小量化器
+    int qmax = -1;                    // 最大量化器
+    const char* level = nullptr;      // 编码级别
+    const char* opts_json = nullptr;  // 编码器私有参数 JSON（av_opt_set）
 };
 
 struct AudioConfig {
-    const char* codec = nullptr;   // nullptr 或 "copy" = 流拷贝
-    const char* rate_control = nullptr; // cbr / abr / vbr / vbr_quality 等
-    int64_t bitrate = 0;
-    double quality = 0;            // 音频质量参数（编码器相关）
-    int sample_rate = 0;
-    const char* channel_layout = nullptr;
-    const char* opts_json = nullptr; // 编码器私有参数 JSON（av_opt_set）
+    const char* codec = nullptr;            // nullptr 或 "copy" = 流拷贝
+    int64_t bitrate = 0;                    // 码率
+    int sample_rate = 0;                    // 采样率 (0 = 保持)
+    const char* channel_layout = nullptr;   // 声道布局
+    int compression_level = -1;             // 压缩级别 (-1 = 默认)
+    const char* opts_json = nullptr;        // 编码器私有参数 JSON（av_opt_set）
 };
 
 struct TranscodeConfig {
@@ -486,11 +459,6 @@ struct TranscodeConfig {
     const char* format = nullptr;       // 容器格式 (nullptr = 从扩展名推断)
     bool overwrite = false;
     bool preserve_metadata = true;
-};
-
-struct TranscodeResult {
-    bool ok = false;
-    const char* error = nullptr;
 };
 
 TranscodeResult transcode_run(const TranscodeConfig& cfg);
@@ -508,45 +476,11 @@ public:
     void stop();
     bool is_running() const;
 };
-
-// 用法
-//   MediaGoServer svr;
-//   svr.start(9527, "./frontend/dist");  // 生产模式
-//   svr.start(9527);                     // 仅 API 模式
 ```
 
 ### BatchProcessor（`src/core/batch.h`）
 
 ```cpp
-struct BatchJobItem {
-    std::string input;            // 必填，支持通配符
-    std::string output;           // 可选
-    std::string video_codec;      // 空字符串 = 拷贝
-    std::string video_rate_control; // crf / cqp / abr / cbr / vbr 等
-    int video_crf = -1;
-    int64_t video_bitrate = 0;
-    int64_t video_maxrate = 0;
-    int64_t video_bufsize = 0;
-    double video_min_qp = -1;
-    double video_max_qp = -1;
-    int video_width = 0;
-    int video_height = 0;
-    double video_fps = 0.0;
-    bool video_keep_aspect = true;
-    bool video_copy = false;
-    std::string video_preset;
-    std::string video_tune;
-    std::string video_opts_json;   // 视频编码器私有参数 JSON
-    std::string audio_codec;      // 空字符串 = 拷贝
-    std::string audio_rate_control; // cbr / abr / vbr / vbr_quality 等
-    int64_t audio_bitrate = 0;
-    double audio_quality = 0;
-    bool audio_copy = false;
-    std::string audio_opts_json;   // 音频编码器私有参数 JSON
-    std::string format;           // 容器格式
-    bool overwrite = false;
-};
-
 struct BatchJobResult {
     bool ok = false;
     std::string input;
@@ -559,14 +493,52 @@ struct BatchJobResult {
 
 enum class JobStatus { Processing, OK, Fail };
 
-using ProgressCallback = std::function<void(unsigned index, unsigned total,
-                                             JobStatus status,
-                                             const std::string& input)>;
+using ProgressCallback = std::function<void(
+    unsigned index, unsigned total,
+    JobStatus status,
+    const std::string& input,
+    const std::string& output)>;
+
+struct BatchJobItem {
+    std::string input;
+    std::string output;
+    std::string video_codec;
+    int video_crf = -1;
+    int64_t video_bitrate = 0;
+    int64_t video_maxrate = 0;
+    int64_t video_bufsize = 0;
+    int video_width = 0;
+    int video_height = 0;
+    double video_fps = 0.0;
+    bool video_keep_aspect = true;
+    bool video_copy = false;
+    std::string video_preset;
+    std::string video_tune;
+    std::string video_profile;
+    std::string video_pixel_fmt;
+    int video_gop_size = 0;
+    int video_threads = 0;
+    int video_b_frames = -1;
+    int video_qmin = -1;
+    int video_qmax = -1;
+    std::string video_level;
+    std::string video_opts_json;
+    std::string audio_codec;
+    int64_t audio_bitrate = 0;
+    int audio_sample_rate = 0;
+    std::string audio_channel_layout;
+    int audio_compression_level = -1;
+    std::string audio_opts_json;
+    bool audio_copy = false;
+    std::string format;
+    bool overwrite = false;
+};
 
 class BatchProcessor {
 public:
     bool process(const char* manifest_path,
                  ProgressCallback on_progress = nullptr);
+    const std::string& last_error() const;
 };
 ```
 
@@ -604,7 +576,7 @@ struct CodecInfo {
     bool is_encoder;
     bool is_decoder;
     bool is_hardware;
-    bool is_image;          // true = 图片编码器（mjpeg / libwebp 等）
+    bool is_image;          // 图片编码器（mjpeg 等）
 };
 
 struct PixelFmtInfo {
@@ -615,11 +587,12 @@ struct PixelFmtInfo {
 };
 
 int config_list_codecs(CodecInfo* out, int max_count,
-                       bool encoders_only, bool video_only);
+                       bool encoders_only, bool video_only,
+                       bool audio_only = false);
 int config_list_pixel_fmts(PixelFmtInfo* out, int max_count);
 ```
 
-### 缩放枚举（`src/core/config.h`）
+### 缩放（`src/core/config.h`）
 
 ```cpp
 enum class ScaleMode {
@@ -668,9 +641,9 @@ enum class ScaleAlgorithm {
 
 ### 图片格式
 
-PNG / JPEG / BMP / WebP / AVIF / TIFF / HEIF / HEIC / ICO / GIF / DNG / SVG
+PNG / JPEG / BMP / WebP / AVIF / TIFF / HEIF / HEIC / ICO / GIF / SVG
 
-DNG 为 Bayer raw 格式，不支持去马赛克（仅 probe）。SVG 矢量图通过 nanosvg 光栅化后编码。
+SVG 矢量图通过 nanosvg 光栅化后编码。
 
 ### 视频格式
 
@@ -686,14 +659,12 @@ MP3 / WAV / FLAC / AAC / OGG / Opus / WMA
 |----|---------|------|
 | `libavcodec` | transcode_engine / config / media_io | 编解码、编解码器枚举 |
 | `libavformat` | transcode_engine / media_io | 容器封装/解封装、流探测 |
-| `libavutil` | transcode_engine / media_io | 像素格式、帧管理、内存分配 |
+| `libavutil` | transcode_engine / media_io | 像素格式、帧管理、参数设置 |
 | `libswscale` | transcode_engine | 像素格式转换、缩放 |
 | `libswresample` | transcode_engine | 音频采样率/声道布局转换 |
-| `libavfilter` | transcode_engine | 视频滤镜图（scale / fps / 自定义） |
+| `libavfilter` | transcode_engine | 视频滤镜图（scale / fps / format） |
 
 ## CMake 参考
-
-### 自定义 FindFFmpeg 模块
 
 `cmake/FindFFmpeg.cmake` 按以下优先级查找 FFmpeg：
 
@@ -705,14 +676,16 @@ MP3 / WAV / FLAC / AAC / OGG / Opus / WMA
 
 ## 技术栈
 
-| 层 | 技术 | 说明 |
-|----|------|------|
-| 转码引擎 | C++17 + FFmpeg | 五阶段原生管线 |
-| HTTP 服务 | cpp-httplib | 单头文件零依赖 |
-| 前端框架 | Vue 3 + TypeScript | 组件化 GUI |
-| UI 组件库 | Element Plus | 企业级设计规范 |
-| 构建工具 | Vite | 极速开发体验 |
-| 桌面打包 | Tauri 2.x（规划中） | 轻量跨平台桌面 App |
+| 层 | 技术 |
+|----|------|
+| 转码引擎 | C++17 + FFmpeg 原生管线 |
+| HTTP 服务 | cpp-httplib（单头文件，MIT） |
+| JSON 解析 | nlohmann/json（MIT） |
+| SVG 渲染 | nanosvg（zlib） |
+| 前端框架 | Vue 3 + TypeScript |
+| UI 组件库 | Element Plus |
+| 构建工具 | Vite |
+| 构建系统 | CMake 3.16+ |
 
 ## 许可
 
